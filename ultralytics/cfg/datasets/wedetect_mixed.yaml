@@ -1,0 +1,18 @@
+# WeDetect mixed-dataset configuration for training from scratch
+# Supports both YOLO detection datasets and grounding datasets
+# Example usage: yolo train model=wedetect.yaml scale=base data=wedetect_mixed.yaml
+
+train:
+  yolo_data:
+    - coco.yaml
+  # grounding_data:  # optional grounding data
+  #   - img_path: path/to/images
+  #     json_file: path/to/annotations.jsonl
+
+val:
+  yolo_data:
+    - coco.yaml
+
+# Class texts for open-vocabulary detection (optional)
+# When provided, class_texts takes priority over names for generating text embeddings.
+# class_texts: texts/coco_zh_class_texts.json

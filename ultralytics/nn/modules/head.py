@@ -1760,6 +1760,124 @@ class RTDETRDecoder(nn.Module):
             xavier_uniform_(layer[0].weight)
 
 
+class WeDetectDetect(Detect):
+    """WeDetect detection head for open-vocabulary detection with XLM-RoBERTa text features.
+
+    Similar to WorldDetect but adapted for ConvNeXt backbone channel dimensions
+    and XLM-RoBERTa text embeddings. Uses BNContrastiveHead for text-vision
+    alignment.
+
+    Args:
+        nc (int): Number of classes.
+        embed (int): Text embedding dimension. Default: 768.
+        with_bn (bool): Whether to use BNContrastiveHead. Default: True.
+        reg_max (int): Maximum DFL channels. Default: 16.
+        end2end (bool): Whether to use end-to-end NMS-free detection. Default: False.
+        ch (tuple): Channel sizes from neck feature maps.
+    """
+
+    def __init__(
+        self,
+        nc: int = 80,
+        embed: int = 768,
+        with_bn: bool = True,
+        reg_max: int = 16,
+        end2end: bool = False,
+        ch: tuple = (),
+    ):
+        super().__init__(nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        c3 = max(ch[0], min(self.nc, 100))
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
+
+    @classmethod
+    def from_config(cls, nc, embed, with_bn, reg_max, end2end, ch, head_in_channels, normalize_text=True):
+        c2 = max((16, head_in_channels[0] // 4, reg_max * 4))
+        c3 = max(head_in_channels[0], nc)
+        obj = cls.__new__(cls)
+        Detect.__init__(obj, nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        obj.cv2 = nn.ModuleList(
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * reg_max, 1)) for x in ch
+        )
+        obj.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch
+        )
+        obj.cv4 = nn.ModuleList(BNContrastiveHead(embed, normalize_text=normalize_text) if with_bn else ContrastiveHead() for _ in ch)
+        return obj
+
+    def forward(self, x: list[torch.Tensor], text: torch.Tensor) -> dict[str, torch.Tensor] | tuple:
+        """Concatenate and return predicted bounding boxes and class probabilities."""
+        feats = [xi.clone() for xi in x]
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv4[i](self.cv3[i](x[i]), text)), 1)
+        nc = text.shape[1]
+        self.no = nc + self.reg_max * 4
+        bs = x[0].shape[0]
+        x_cat = torch.cat([xi.view(bs, self.no, -1) for xi in x], 2)
+        boxes, scores = x_cat.split((self.reg_max * 4, nc), 1)
+        preds = dict(boxes=boxes, scores=scores, feats=feats)
+        if self.training:
+            return preds
+        y = self._inference(preds)
+        return y if self.export else (y, preds)
+
+    def bias_init(self):
+        """Initialize Detect() biases, WARNING: requires stride availability."""
+        m = self
+        for a, b, s in zip(m.cv2, m.cv3, m.stride):
+            a[-1].bias.data[:] = 1.0
+
+    @smart_inference_mode()
+    def fuse(self, txt_feats: torch.Tensor = None):
+        """Fuse text features with model weights for efficient inference.
+
+        Fuses the text prompt embeddings into the classification head weights
+        so that the model can perform prompt-free inference.  This follows the
+        same pattern as ``YOLOEDetect.fuse``.
+
+        Args:
+            txt_feats (torch.Tensor): Text prompt embeddings, shape (1, nc, embed).
+        """
+        if txt_feats is None:
+            return
+        txt_feats = txt_feats.to(torch.float32).squeeze(0)
+        if self.cv3 and self.cv4:
+            for cls_h, bn_h in zip(self.cv3, self.cv4):
+                assert isinstance(cls_h, nn.Sequential)
+                assert isinstance(bn_h, BNContrastiveHead)
+                conv = cls_h[-1]
+                assert isinstance(conv, nn.Conv2d)
+                logit_scale = bn_h.logit_scale
+                bias = bn_h.bias
+                norm = bn_h.norm
+
+                t = txt_feats * logit_scale.exp()
+                conv = fuse_conv_and_bn(conv, norm)
+
+                w = conv.weight.data.squeeze(-1).squeeze(-1)
+                b = conv.bias.data
+
+                w = t @ w
+                b1 = (t @ b.reshape(-1).unsqueeze(-1)).squeeze(-1)
+                b2 = torch.ones_like(b1) * bias
+
+                fused_conv = (
+                    nn.Conv2d(
+                        conv.in_channels,
+                        w.shape[0],
+                        kernel_size=1,
+                    )
+                    .requires_grad_(False)
+                    .to(conv.weight.device)
+                )
+
+                fused_conv.weight.data.copy_(w.unsqueeze(-1).unsqueeze(-1))
+                fused_conv.bias.data.copy_(b1 + b2)
+                cls_h[-1] = fused_conv
+
+                bn_h.fuse()
+
+
 class v10Detect(Detect):
     """v10 Detection head from https://arxiv.org/pdf/2405.14458.
 

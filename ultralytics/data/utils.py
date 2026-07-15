@@ -514,6 +514,15 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
     data["names"] = check_class_names(data["names"])
     data["channels"] = data.get("channels", 3)  # get image channels, default to 3
 
+    # Resolve class_texts path (WeDetect open-vocabulary datasets)
+    if data.get("class_texts"):
+        ct = Path(data["class_texts"])
+        if not ct.is_absolute():
+            ct = (Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent) / ct).resolve()
+            if not ct.exists() and not str(ct).startswith(str(DATASETS_DIR)):
+                ct = (DATASETS_DIR / data["class_texts"]).resolve()
+        data["class_texts"] = str(ct)
+
     # Resolve paths
     path = Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent)  # dataset root
     if not path.exists() and not path.is_absolute():

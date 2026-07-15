@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from collections import defaultdict
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
@@ -319,11 +320,39 @@ class YOLODataset(BaseDataset):
         return new_batch
 
 
+class _NegQueue:
+    """Fixed-size negative text queue for open-vocabulary training.
+
+    Maintains a bounded set of negative samples with random eviction.
+    ``enrich`` appends queue entries not present in *class_texts*.
+    Follows the original WeDetect ``NegQueue`` implementation.
+    """
+
+    def __init__(self, size: int = 80):
+        self.size = size
+        self.queue: set[str] = set()
+
+    def update(self, data: list[str]) -> None:
+        flat = [x for x in data if isinstance(x, str)]
+        self.queue.update(flat)
+        if len(self.queue) > self.size:
+            self.queue = set(random.sample(list(self.queue), self.size))
+        self.queue.discard("object")
+
+    def enrich(self, class_texts: list[list[str]]) -> list[list[str]]:
+        known = {xx for x in class_texts for xx in x}
+        return class_texts + [[s] for s in self.queue - known]
+
+
 class YOLOMultiModalDataset(YOLODataset):
     """Dataset class for loading object detection and/or segmentation labels in YOLO format with multi-modal support.
 
     This class extends YOLODataset to add text information for multi-modal model training, enabling models to process
     both image and text data.
+
+    Supports loading class texts from either:
+    - The ``names`` field in the data config (with ``/``-separated synonyms)
+    - An external ``class_texts`` JSON file (``[["cat"], ["dog", "puppy"], ...]``)
 
     Methods:
         update_labels_info: Add text information for multi-modal model training.
@@ -345,9 +374,73 @@ class YOLOMultiModalDataset(YOLODataset):
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
         super().__init__(*args, data=data, task=task, **kwargs)
+        self._class_texts = self._load_class_texts(data or {})
+        self._neg_queue: _NegQueue | None = None
+        self._global_texts: list[list[str]] | None = None
+        self._local_to_global: dict[int, int] | None = None
+
+    def _load_class_texts(self, data: dict) -> list[list[str]] | None:
+        """Load class texts from external JSON file or return None to use data.names fallback."""
+        path_str = data.get("class_texts")
+        if not path_str:
+            return None
+        p = Path(path_str)
+        if not p.is_absolute():
+            p = Path(data.get("path", ".")) / p
+        if not p.exists():
+            LOGGER.warning(f"class_texts file not found: '{p}', falling back to data.names")
+            return None
+        with open(p) as f:
+            raw = json.load(f)
+        if not isinstance(raw, list) or len(raw) == 0:
+            return None
+        nc = data.get("nc", 0)
+        parsed = [[s.strip() for s in (x if isinstance(x, list) else [x])] for x in raw]
+        LOGGER.info(f"Loaded class_texts from '{p}' ({len(parsed)} classes)")
+        if nc > 0 and len(parsed) != nc:
+            LOGGER.warning(f"class_texts count ({len(parsed)}) != nc ({nc}), truncating to {min(len(parsed), nc)}")
+            parsed = parsed[: min(len(parsed), nc)]
+        return parsed
+
+    @property
+    def class_texts(self) -> list[list[str]]:
+        """Return class texts, preferring external file over data.names."""
+        if self._class_texts is not None:
+            return self._class_texts
+        return [v.split("/") for _, v in self.data["names"].items()]
+
+    def set_global_texts(self, global_texts: list[list[str]], local_to_global: dict[int, int]) -> None:
+        """Set global text vocabulary and local-to-global ID mapping for cross-dataset alignment.
+
+        When global texts are set, ``update_labels_info`` will remap local class IDs
+        to global IDs and provide the global text list, enabling contrastive learning
+        across all datasets simultaneously.
+
+        Args:
+            global_texts: Flat list of text lists from ALL datasets, e.g.
+                ``[["cat"], ["dog"], ["person"], ["car"]]``.
+            local_to_global: Mapping from this dataset's local class ID to the
+                index in ``global_texts``, e.g. ``{0: 2, 1: 3}`` means local
+                class 0 maps to global "person" and local 1 maps to global "car".
+        """
+        self._global_texts = global_texts
+        self._local_to_global = local_to_global
+        LOGGER.info(
+            f"Set global texts ({len(global_texts)} classes, "
+            f"{len(local_to_global)} local→global mappings) for dataset '{self.img_path}'"
+        )
+
+    @property
+    def _active_texts(self) -> list[list[str]]:
+        """Return global texts if set, otherwise local class texts."""
+        return self._global_texts if self._global_texts is not None else self.class_texts
 
     def update_labels_info(self, label: dict) -> dict:
         """Add text information for multi-modal model training.
+
+        When global texts are set, remaps local class IDs to global IDs and
+        provides the global text list so that RandomLoadText samples from the
+        unified vocabulary across all datasets.
 
         Args:
             label (dict): Label dictionary containing bboxes, segments, keypoints, etc.
@@ -356,10 +449,10 @@ class YOLOMultiModalDataset(YOLODataset):
             (dict): Updated label dictionary with instances and texts.
         """
         labels = super().update_labels_info(label)
-        # NOTE: some categories are concatenated with its synonyms by `/`.
-        # NOTE: and `RandomLoadText` would randomly select one of them if there are multiple words.
-        labels["texts"] = [v.split("/") for _, v in self.data["names"].items()]
-
+        labels["texts"] = self._active_texts
+        if self._local_to_global is not None:
+            cls = labels["cls"].flatten().astype(int)
+            labels["cls"] = np.array([self._local_to_global.get(c, c) for c in cls]).reshape(labels["cls"].shape)
         return labels
 
     def build_transforms(self, hyp: dict | None = None) -> Compose:
@@ -373,12 +466,8 @@ class YOLOMultiModalDataset(YOLODataset):
         """
         transforms = super().build_transforms(hyp)
         if self.augment:
-            # NOTE: hard-coded the args for now.
-            # NOTE: this implementation is different from official yoloe,
-            # the strategy of selecting negative is restricted in one dataset,
-            # while official pre-saved neg embeddings from all datasets at once.
             transform = RandomLoadText(
-                max_samples=min(self.data["nc"], 80),
+                max_samples=min(len(self._active_texts), 80),
                 padding=True,
                 padding_value=self._get_neg_texts(self.category_freq),
             )
@@ -392,25 +481,33 @@ class YOLOMultiModalDataset(YOLODataset):
         Returns:
             (set[str]): Set of class names.
         """
-        names = self.data["names"].values()
-        return {n.strip() for name in names for n in name.split("/")}  # category names
+        return {n.strip() for text in self.class_texts for n in text}
 
     @property
     def category_freq(self):
         """Return frequency of each category in the dataset."""
-        texts = [v.split("/") for v in self.data["names"].values()]
+        texts = self.class_texts
         category_freq = defaultdict(int)
         for label in self.labels:
-            for c in label["cls"].squeeze(-1):  # to check
-                text = texts[int(c)]
-                for t in text:
-                    t = t.strip()
-                    category_freq[t] += 1
+            for c in label["cls"].squeeze(-1):
+                idx = int(c)
+                if idx < len(texts):
+                    for t in texts[idx]:
+                        category_freq[t.strip()] += 1
         return category_freq
+
+    @property
+    def neg_queue(self) -> _NegQueue:
+        """Return (and lazily create) the negative text queue."""
+        if self._neg_queue is None:
+            self._neg_queue = _NegQueue(size=min(len(self.class_texts), 80))
+        return self._neg_queue
 
     @staticmethod
     def _get_neg_texts(category_freq: dict, threshold: int = 100) -> list[str]:
         """Get negative text samples based on frequency threshold."""
+        if not category_freq:
+            return [""]
         threshold = min(max(category_freq.values()), 100)
         return [k for k, v in category_freq.items() if v >= threshold]
 

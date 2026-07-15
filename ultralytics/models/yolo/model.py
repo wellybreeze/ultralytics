@@ -18,6 +18,8 @@ from ultralytics.nn.tasks import (
     PoseModel,
     SegmentationModel,
     SemanticSegmentationModel,
+    WeDetectModel,
+    WeDetectUniModel,
     WorldModel,
     YOLOEModel,
     YOLOESegModel,
@@ -68,6 +70,10 @@ class YOLO(Model):
         path = Path(model if isinstance(model, (str, Path)) else "")
         if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOWorld PyTorch model
             new_instance = YOLOWorld(path, verbose=verbose)
+            self.__class__ = type(new_instance)
+            self.__dict__ = new_instance.__dict__
+        elif "wedetect" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:
+            new_instance = WeDetect(path, verbose=verbose)
             self.__class__ = type(new_instance)
             self.__dict__ = new_instance.__dict__
         elif "yoloe" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOE PyTorch model
@@ -440,3 +446,101 @@ class YOLOE(Model):
         self.overrides["agnostic_nms"] = True  # use agnostic nms for YOLOE default
 
         return super().predict(source, stream, **kwargs)
+
+
+class WeDetect(Model):
+    """WeDetect open-vocabulary detection model with ConvNeXt + XLM-RoBERTa.
+
+    WeDetect uses a ConvNeXt vision backbone and XLM-RoBERTa multilingual text
+    encoder for open-vocabulary object detection.  It supports multilingual
+    prompts out of the box.
+
+    Attributes:
+        model: The loaded WeDetect model instance.
+        task: Always set to 'detect'.
+        overrides: Configuration overrides for the model.
+
+    Methods:
+        __init__: Initialize WeDetect model.
+        task_map: Map tasks to their corresponding model, trainer, validator, and predictor classes.
+        set_classes: Set the model's class names for detection.
+    """
+
+    def __init__(self, model: str | Path = "wedetect-base.pt", verbose: bool = False) -> None:
+        """Initialize WeDetect model.
+
+        Args:
+            model (str | Path): Path to the model file. Supports *.pt (Ultralytics format)
+                and *.yaml config files.
+            verbose (bool): If True, prints additional information during initialization.
+        """
+        super().__init__(model=model, task="detect", verbose=verbose)
+        if not hasattr(self.model, "names"):
+            self.model.names = YAML.load(ROOT / "cfg/datasets/coco8.yaml").get("names")
+
+    def set_classes(self, classes: list[str]) -> None:
+        """Set the model's class names for detection.
+
+        Args:
+            classes (list[str]): A list of categories i.e. ["person"].
+        """
+        self.model.set_classes(classes)
+        self.model.names = {i: n for i, n in enumerate(classes)}
+        if self.predictor:
+            self.predictor.model.names = self.model.names
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map head to model, trainer, validator, and predictor classes."""
+        return {
+            "detect": {
+                "model": WeDetectModel,
+                "validator": yolo.wedetect.WeDetectValidator,
+                "predictor": yolo.wedetect.WeDetectPredictor,
+                "trainer": yolo.wedetect.WeDetectTrainer,
+            }
+        }
+
+
+class WeDetectUni(Model):
+    """WeDetect-Uni unified detection model with learnable prompt embeddings.
+
+    WeDetect-Uni eliminates the need for a text encoder at inference time by using
+    learnable prompt embeddings, enabling faster inference compared to WeDetect.
+
+    Attributes:
+        model: The loaded WeDetect-Uni model instance.
+        task: Always set to 'detect'.
+        overrides: Configuration overrides for the model.
+
+    Methods:
+        __init__: Initialize WeDetect-Uni model.
+        task_map: Map tasks to their corresponding model, trainer, validator, and predictor classes.
+    """
+
+    def __init__(self, model: str | Path = "wedetect-base-uni.pt", verbose: bool = False) -> None:
+        """Initialize WeDetect-Uni model.
+
+        Args:
+            model (str | Path): Path to the model file. Supports *.pt (Ultralytics format)
+                and *.yaml config files.
+            verbose (bool): If True, prints additional information during initialization.
+        """
+        super().__init__(model=model, task="detect", verbose=verbose)
+        self.model.names = {0: "object"}
+        if isinstance(self.model, WeDetectUniModel):
+            self.model.model[-1].nc = 1
+            self.overrides["single_cls"] = True
+            self.overrides["agnostic_nms"] = True
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map head to model, trainer, validator, and predictor classes."""
+        return {
+            "detect": {
+                "model": WeDetectUniModel,
+                "validator": yolo.wedetect.WeDetectUniValidator,
+                "predictor": yolo.wedetect.WeDetectUniPredictor,
+                "trainer": yolo.wedetect.WeDetectUniTrainer,
+            }
+        }

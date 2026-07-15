@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import abstractmethod
 from pathlib import Path
 
+import os
+
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -15,8 +17,7 @@ from ultralytics.utils.torch_utils import smart_inference_mode
 try:
     import clip
 except ImportError:
-    checks.check_requirements("git+https://github.com/ultralytics/CLIP.git")
-    import clip
+    clip = None
 
 
 class TextModel(nn.Module):
@@ -80,6 +81,12 @@ class CLIP(TextModel):
             device (torch.device): Device to load the model on.
         """
         super().__init__()
+        global clip
+        if clip is None:
+            checks.check_requirements("git+https://github.com/ultralytics/CLIP.git")
+            import clip as _clip
+
+            clip = _clip
         self.model, self.image_preprocess = clip.load(size, device=device, download_root=str(WEIGHTS_DIR / "clip"))
         self.to(device)
         self.device = device
@@ -335,12 +342,158 @@ class MobileCLIPTS(TextModel):
         return self.encoder(texts).to(dtype)
 
 
-def build_text_model(variant: str, device: torch.device = None) -> TextModel:
+class XLMRoberta(TextModel):
+    """XLM-RoBERTa text encoder for multilingual open-vocabulary detection.
+
+    Encodes text descriptions into L2-normalized feature vectors using
+    Facebook's XLM-RoBERTa model, followed by a linear projection head.
+    Supports base (768→768) and large (1024→768) model sizes.
+
+    Attributes:
+        model (XLMRobertaModel): The XLM-RoBERTa encoder.
+        tokenizer (AutoTokenizer): The associated tokenizer.
+        head (nn.Linear): Linear projection from hidden dim to embed dim.
+        device (torch.device): Device where the model is loaded.
+
+    Methods:
+        tokenize: Convert input texts to token tensors.
+        encode_text: Encode tokenized texts into normalized feature vectors.
+
+    Examples:
+        >>> model = XLMRoberta(size="base", device=torch.device("cpu"))
+        >>> tokens = model.tokenize([["person", "car", "dog"]])
+        >>> features = model.encode_text(tokens)
+    """
+
+    _size_cfg = {
+        "base": {"model_name": "xlm-roberta-base", "hidden": 768, "embed": 768},
+        "large": {"model_name": "xlm-roberta-large", "hidden": 1024, "embed": 768},
+    }
+
+    def __init__(self, size: str, device: torch.device, state_dict: dict | None = None) -> None:
+        """Initialize the XLM-RoBERTa text encoder.
+
+        Args:
+            size (str): Model size identifier, one of 'base', 'large'.
+            device (torch.device): Device to load the model on.
+            state_dict (dict | None): Optional state dict to load into the model (including
+                XLM-RoBERTa backbone and head projection weights).
+        """
+        try:
+            from transformers import AutoTokenizer, XLMRobertaModel
+        except ImportError:
+            checks.check_requirements("transformers")
+            from transformers import AutoTokenizer, XLMRobertaModel
+
+        super().__init__()
+        cfg = self._size_cfg.get(size)
+        if cfg is None:
+            raise ValueError(f"Unknown XLM-RoBERTa size '{size}'. Choose from {list(self._size_cfg)}")
+        model_name = cfg["model_name"]
+        _root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        local_paths = [
+            os.path.join(_root, model_name),
+            os.path.join(_root, "checkpoints", model_name),
+        ]
+        local_path = None
+        for p in local_paths:
+            if os.path.isdir(p) and os.path.exists(os.path.join(p, "config.json")):
+                local_path = p
+                break
+        has_local_weights = (
+            local_path
+            and (os.path.exists(os.path.join(local_path, "pytorch_model.bin"))
+                 or os.path.exists(os.path.join(local_path, "model.safetensors")))
+        )
+        try:
+            if local_path:
+                self.tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+                if has_local_weights:
+                    self.model = XLMRobertaModel.from_pretrained(local_path, local_files_only=True)
+                else:
+                    from transformers import XLMRobertaConfig
+                    xcfg = XLMRobertaConfig.from_pretrained(local_path)
+                    self.model = XLMRobertaModel(xcfg)
+            else:
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+                self.model = XLMRobertaModel.from_pretrained(model_name, local_files_only=True)
+        except OSError:
+            save_dir = os.path.join(_root, model_name)
+            os.makedirs(save_dir, exist_ok=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = XLMRobertaModel.from_pretrained(model_name)
+            self.tokenizer.save_pretrained(save_dir)
+            self.model.save_pretrained(save_dir)
+        self.head = nn.Linear(cfg["hidden"], cfg["embed"], bias=True)
+        if state_dict is not None:
+            self.model.load_state_dict(
+                {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")},
+                strict=False,
+            )
+            head_sd = {k[len("head."):]: v for k, v in state_dict.items() if k.startswith("head.")}
+            if head_sd:
+                self.head.load_state_dict(head_sd)
+        self.to(device)
+        self.device = device
+        self.eval()
+
+    def tokenize(self, texts, truncate: bool = True) -> dict:
+        """Convert input texts to XLM-RoBERTa token dicts.
+
+        Args:
+            texts (list[list[str]] | list[str]): Nested list of class texts
+                (e.g. ``[["person", "car"]]``) or flat list of strings.
+            truncate (bool): Whether to truncate long sequences.
+
+        Returns:
+            (dict): Tokenizer output with ``input_ids`` and ``attention_mask`` tensors.
+        """
+        import itertools
+
+        flat = list(itertools.chain(*texts)) if texts and isinstance(texts[0], (list, tuple)) else texts
+        encoded = self.tokenizer(text=flat, return_tensors="pt", padding=True, truncation=truncate, max_length=77)
+        return {k: v.to(self.device) for k, v in encoded.items()}
+
+    @smart_inference_mode()
+    def encode_text(self, texts, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Encode tokenized texts into normalized feature vectors.
+
+        Accepts either a tokenizer output dict (from :meth:`tokenize`) or a
+        nested list of strings that will be tokenized on the fly.
+
+        Args:
+            texts (dict | list): Tokenizer output dict or nested text list.
+            dtype (torch.dtype): Output data type.
+
+        Returns:
+            (torch.Tensor): Normalized text features, shape ``(1, num_classes, embed_dim)``.
+        """
+        import itertools
+
+        if isinstance(texts, dict):
+            encoded = {k: v.to(self.device) for k, v in texts.items()}
+            num_classes = encoded["input_ids"].shape[0]
+        else:
+            is_nested = texts and isinstance(texts[0], (list, tuple))
+            flat = list(itertools.chain(*texts)) if is_nested else list(texts)
+            num_classes = len(flat)
+            encoded = self.tokenizer(text=flat, return_tensors="pt", padding=True, truncation=True, max_length=77)
+            encoded = {k: v.to(self.device) for k, v in encoded.items()}
+
+        outputs = self.model(**encoded)
+        txt_feats = outputs.last_hidden_state[:, 0]
+        txt_feats = self.head(txt_feats)
+        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+        return txt_feats.reshape(1, num_classes, -1).to(dtype)
+
+
+def build_text_model(variant: str, device: torch.device = None, state_dict: dict | None = None) -> TextModel:
     """Build a text encoding model based on the specified variant.
 
     Args:
         variant (str): Model variant in format "base:size" (e.g., "clip:ViT-B/32" or "mobileclip:s0").
         device (torch.device, optional): Device to load the model on.
+        state_dict (dict | None): Optional state dict for XLM-RoBERTa models.
 
     Returns:
         (TextModel): Instantiated text encoding model.
@@ -356,5 +509,9 @@ def build_text_model(variant: str, device: torch.device = None) -> TextModel:
         return MobileCLIPTS(device)
     elif base == "mobileclip2":
         return MobileCLIPTS(device, weight="mobileclip2_b.ts")
+    elif base == "xlm-roberta":
+        return XLMRoberta(size, device, state_dict=state_dict)
     else:
-        raise ValueError(f"Unrecognized base model '{base}'. Supported models are 'clip', 'mobileclip', 'mobileclip2'.")
+        raise ValueError(
+            f"Unrecognized base model '{base}'. Supported models are 'clip', 'mobileclip', 'mobileclip2', 'xlm-roberta'."
+        )

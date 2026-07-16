@@ -2,10 +2,11 @@
 
 from .fastsam import FastSAM
 from .nas import NAS
+from .rfdetr import RFDETR
 from .rtdetr import RTDETR
 from .yolo import YOLO, YOLOE, YOLOWorld
 
-__all__ = "NAS", "RTDETR", "SAM", "YOLO", "YOLOE", "FastSAM", "YOLOWorld"  # allow simpler import
+__all__ = "NAS", "RFDETR", "RTDETR", "SAM", "YOLO", "YOLOE", "FastSAM", "YOLOWorld"  # allow simpler import
 
 
 def __getattr__(name):

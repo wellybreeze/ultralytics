@@ -866,6 +866,137 @@ class ClassificationModel(BaseModel):
         return v8ClassificationLoss()
 
 
+class RFDETRDetectionModel(BaseModel):
+    """RF-DETR detection model wrapping the native LWDETR architecture."""
+
+    def __init__(self, cfg="rfdetr-nano.yaml", ch=3, nc=None, verbose=True):
+        """Initialize RF-DETR from an Ultralytics RF-DETR YAML dictionary or path."""
+        super().__init__()
+        from ultralytics.models.rfdetr.build import build_rfdetr_model
+
+        from ultralytics.models.rfdetr.build import rfdetr_class_names
+
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        self.model, self.model_config, class_names = build_rfdetr_model(cfg=self.yaml, nc=nc, verbose=verbose)
+        self.yaml.setdefault("channels", 3)
+        self.names = rfdetr_class_names(self.model_config.num_classes, class_names)
+        self.nc = self.model_config.num_classes
+        block = int(self.model_config.patch_size) * int(self.model_config.num_windows)
+        self.stride = torch.Tensor([block])
+        self.task = "detect"
+        self.inplace = True
+        self.end2end = False
+        if verbose:
+            self.info()
+
+    def forward(self, x, *args, **kwargs):
+        """Run inference for tensors and calculate loss for training batches."""
+        return self.loss(x, *args, **kwargs) if isinstance(x, dict) else self.predict(x, *args, **kwargs)
+
+    def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None):
+        """Run native LWDETR inference."""
+        return self.model(x)
+
+    def fuse(self, verbose=True):
+        """RF-DETR has no Conv+BN fusion; print the Ultralytics model summary when verbose.
+
+        Matches YOLO CLI predict, where ``fuse(verbose=True)`` ends in ``info()`` and emits a line like
+        ``YOLO26n summary (fused): …``.
+        """
+        if verbose:
+            self.info(verbose=verbose)
+        return self
+
+    def is_fused(self, thresh=10):
+        """RF-DETR does not fuse Conv+BN; report fused so exporters / backends skip redundant work."""
+        return True
+
+    def _apply(self, fn):
+        """Apply ``fn`` to parameters/buffers without assuming a Detect() Sequential head."""
+        return super(BaseModel, self)._apply(fn)
+
+    def init_criterion(self):
+        """Build RF-DETR's Hungarian-matching criterion from Ultralytics ``default.yaml`` hyps."""
+        from ultralytics.models.rfdetr.build import build_rfdetr_criterion, sync_rfdetr_model_config
+
+        # Keep criterion on the same device as the live module (ModelConfig.device alone may stay "cpu").
+        device = str(next(self.parameters()).device)
+        if device.startswith("cuda"):
+            device = "cuda"
+        elif device.startswith("mps"):
+            device = "mps"
+        else:
+            device = "cpu"
+        args = getattr(self, "args", None)
+        model_config = sync_rfdetr_model_config(self.model_config, args)
+        if getattr(model_config, "device", None) != device and hasattr(model_config, "model_copy"):
+            model_config = model_config.model_copy(update={"device": device})
+        self.model_config = model_config
+        return build_rfdetr_criterion(model_config, args)
+
+    def loss(self, batch, preds=None):
+        """Adapt an Ultralytics batch into RF-DETR targets and apply official SetCriterion weights.
+
+        Target boxes are YOLO-format normalized ``cxcywh`` (same as official RF-DETR after ``Normalize``).
+        The scalar loss matches ``sum(loss_dict[k] * weight_dict[k])`` used in ``rfdetr`` training_step.
+        """
+        if not hasattr(self, "criterion") or self.criterion is None:
+            self.criterion = self.init_criterion()
+        # Keep matcher group_detr in sync with LWDETR train/eval query count.
+        self.criterion.train(self.training)
+        img = batch["img"]
+        batch_idx = batch["batch_idx"].to(img.device, dtype=torch.long).view(-1)
+        classes = batch["cls"].to(img.device, dtype=torch.long).view(-1)
+        boxes = batch["bboxes"].to(img.device)
+        targets = []
+        for i in range(img.shape[0]):
+            index = batch_idx == i
+            target = {"labels": classes[index], "boxes": boxes[index]}
+            if self.model_config.segmentation_head and "masks" in batch:
+                masks = batch["masks"].to(img.device)
+                if getattr(self, "overlap_mask", False):
+                    count = int(index.sum())
+                    target["masks"] = (
+                        masks[i] == torch.arange(1, count + 1, device=img.device).view(-1, 1, 1)
+                    ).float()
+                else:
+                    target["masks"] = masks[index].float()
+            if self.model_config.use_grouppose_keypoints and "keypoints" in batch:
+                target["keypoints"] = batch["keypoints"].to(img.device)[index]
+            targets.append(target)
+        outputs = preds if preds is not None else self.predict(img)
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        losses = self.criterion(outputs, targets)
+        total = sum(value * self.criterion.weight_dict.get(name, 0.0) for name, value in losses.items())
+        items = torch.stack(
+            [
+                losses.get("loss_giou", total.new_zeros(())),
+                losses.get("loss_ce", total.new_zeros(())),
+                losses.get("loss_bbox", total.new_zeros(())),
+            ]
+        ).detach()
+        return total, items
+
+
+class RFDETRSegmentationModel(RFDETRDetectionModel):
+    """RF-DETR segmentation model wrapping LWDETR with its mask head."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the RF-DETR segmentation wrapper."""
+        super().__init__(*args, **kwargs)
+        self.task = "segment"
+
+
+class RFDETRPoseModel(RFDETRDetectionModel):
+    """RF-DETR pose model wrapping LWDETR with its GroupPose head."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the RF-DETR pose wrapper."""
+        super().__init__(*args, **kwargs)
+        self.task = "pose"
+
+
 class RTDETRDetectionModel(DetectionModel):
     """RTDETR (Real-time DEtection and Tracking using Transformers) Detection Model class.
 
@@ -2054,12 +2185,60 @@ def yaml_model_load(path):
         LOGGER.warning(f"Ultralytics YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
         path = path.with_name(new_stem + path.suffix)
 
+    # RF-DETR: rfdetr-nano.yaml -> rfdetr.yaml; rfdetr-seg-small.yaml -> rfdetr-seg.yaml
+    if "rfdetr" in path.stem.lower() or "rf-detr" in path.stem.lower():
+        unified_path = str(unify_rfdetr_yaml_path(path))
+        yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
+        d = YAML.load(yaml_file)  # model dict
+        d["scale"] = guess_rfdetr_scale(path)
+        d["yaml_file"] = str(path)
+        return d
+
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = YAML.load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
     return d
+
+
+def unify_rfdetr_yaml_path(path):
+    """Map a size-specific RF-DETR YAML path onto its per-task unified file.
+
+    Examples:
+        rfdetr-nano.yaml -> rfdetr.yaml
+        rfdetr-seg-medium.yaml -> rfdetr-seg.yaml
+        rfdetr-pose-preview.yaml -> rfdetr-pose.yaml
+    """
+    path = Path(path)
+    stem = path.stem.lower().replace("_", "-")
+    if "seg" in stem:
+        name = "rfdetr-seg"
+    elif "pose" in stem or "keypoint" in stem:
+        name = "rfdetr-pose"
+    else:
+        name = "rfdetr"
+    return path.with_name(name + path.suffix)
+
+
+def guess_rfdetr_scale(model_path):
+    """Extract the RF-DETR size variant from a model path (analogous to guess_model_scale for YOLO).
+
+    Args:
+        model_path (str | Path): Path such as ``rfdetr-nano.yaml`` or ``rfdetr-seg-large.pt``.
+
+    Returns:
+        (str): Scale key (nano/small/medium/large/xlarge/2xlarge/preview), or empty string if not found.
+    """
+    stem = Path(model_path).stem.lower().replace("_", "-")
+    for scale in ("keypoint-preview", "2xlarge", "xxlarge", "xlarge", "medium", "small", "large", "nano", "preview"):
+        if scale in stem:
+            if scale == "xxlarge":
+                return "2xlarge"
+            if scale in {"keypoint-preview", "preview"}:
+                return "preview"
+            return scale
+    return ""
 
 
 def guess_model_scale(model_path):
@@ -2088,7 +2267,7 @@ def guess_model_task(model):
     """
 
     def cfg2task(cfg):
-        """Guess from YAML dictionary."""
+        """Guess from YAML dictionary via the final head module name (YOLO architecture YAMLs)."""
         m = cfg["head"][-1][-2].lower()  # output module name
         if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
@@ -2107,6 +2286,9 @@ def guess_model_task(model):
     if isinstance(model, dict):
         with contextlib.suppress(Exception):
             return cfg2task(model)
+        # Architecture-free YAMLs (no backbone/head graph): reuse filename cues via yaml_file
+        with contextlib.suppress(Exception):
+            return guess_model_task(model["yaml_file"])
     # Guess from PyTorch model
     if isinstance(model, torch.nn.Module):  # PyTorch model
         for x in "model.args", "model.model.args", "model.model.model.args":

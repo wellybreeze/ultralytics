@@ -259,6 +259,7 @@ nav:
       - FastSAM (Fast Segment Anything Model): models/fast-sam.md
       - YOLO-NAS (Neural Architecture Search): models/yolo-nas.md
       - RT-DETR (Realtime Detection Transformer): models/rtdetr.md
+      - RF-DETR (Roboflow Detection Transformer): models/rfdetr.md
       - YOLO-World: models/yolo-world.md
       - YOLOE (Real-Time Seeing Anything): models/yoloe.md
   - Compare:
@@ -717,6 +718,12 @@ nav:
               - model: reference/models/nas/model.md
               - predict: reference/models/nas/predict.md
               - val: reference/models/nas/val.md
+          - rfdetr:
+              - build: reference/models/rfdetr/build.md
+              - model: reference/models/rfdetr/model.md
+              - predict: reference/models/rfdetr/predict.md
+              - train: reference/models/rfdetr/train.md
+              - val: reference/models/rfdetr/val.md
           - rtdetr:
               - model: reference/models/rtdetr/model.md
               - predict: reference/models/rtdetr/predict.md

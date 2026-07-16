@@ -1,7 +1,7 @@
 ---
 comments: true
-description: Discover a variety of models supported by Ultralytics, including YOLOv3 to YOLO26, NAS, SAM, and RT-DETR for detection, segmentation, semantic segmentation, and more.
-keywords: Ultralytics, supported models, YOLOv3, YOLOv4, YOLOv5, YOLOv6, YOLOv7, YOLOv8, YOLOv9, YOLOv10, YOLO11, SAM, SAM2, SAM3, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, YOLO-World, object detection, image segmentation, semantic segmentation, classification, pose estimation, multi-object tracking
+description: Discover a variety of models supported by Ultralytics, including YOLOv3 to YOLO26, NAS, SAM, RT-DETR, and RF-DETR for detection, segmentation, semantic segmentation, and more.
+keywords: Ultralytics, supported models, YOLOv3, YOLOv4, YOLOv5, YOLOv6, YOLOv7, YOLOv8, YOLOv9, YOLOv10, YOLO11, SAM, SAM2, SAM3, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, RF-DETR, YOLO-World, object detection, image segmentation, semantic segmentation, classification, pose estimation, multi-object tracking
 ---
 
 # Models Supported by Ultralytics
@@ -31,8 +31,9 @@ Here are some of the key models supported:
 15. **[Fast Segment Anything Model (FastSAM)](fast-sam.md)**: FastSAM by Image & Video Analysis Group, Institute of Automation, Chinese Academy of Sciences.
 16. **[YOLO-NAS](yolo-nas.md)**: YOLO [Neural Architecture Search](https://www.ultralytics.com/glossary/neural-architecture-search-nas) (NAS) Models.
 17. **[Real-Time Detection Transformers (RT-DETR)](rtdetr.md)**: Baidu's PaddlePaddle real-time Detection [Transformer](https://www.ultralytics.com/glossary/transformer) (RT-DETR) models.
-18. **[YOLO-World](yolo-world.md)**: Real-time Open Vocabulary Object Detection models from Tencent AI Lab.
-19. **[YOLOE](yoloe.md)**: An improved open-vocabulary object detector that maintains YOLO's real-time performance while detecting arbitrary classes beyond its training data.
+18. **[RF-DETR](rfdetr.md)**: Roboflow's DINOv2-based real-time Detection Transformer for detection, instance segmentation, and keypoints.
+19. **[YOLO-World](yolo-world.md)**: Real-time Open Vocabulary Object Detection models from Tencent AI Lab.
+20. **[YOLOE](yoloe.md)**: An improved open-vocabulary object detector that maintains YOLO's real-time performance while detecting arbitrary classes beyond its training data.
 
 <p align="center">
   <br>

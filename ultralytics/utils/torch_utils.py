@@ -428,7 +428,7 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
     fused = " (fused)" if getattr(model, "is_fused", lambda: False)() else ""
     fs = f", {flops:.1f} GFLOPs" if flops else ""
     yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
-    model_name = Path(yaml_file).stem.replace("yolo", "YOLO") or "Model"
+    model_name = Path(yaml_file).stem.replace("yolo", "YOLO").replace("rf-detr", "RFDETR").replace("rfdetr", "RFDETR") or "Model"
     LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
     return n_l, n_p, n_g, flops
 
@@ -502,15 +502,28 @@ def get_flops(model, imgsz=640):
         p = next(model.parameters())
         if not isinstance(imgsz, list):
             imgsz = [imgsz, imgsz]  # expand if int/float
+        # Prefer declared input channels (YOLO yaml / RF-DETR wrapper); Conv weight shape only when 4-D.
+        yaml = getattr(model, "yaml", None)
+        if isinstance(yaml, dict) and yaml.get("channels") is not None:
+            ch = int(yaml["channels"])
+        elif getattr(model, "channels", None) is not None:
+            ch = int(model.channels)
+        elif getattr(p, "ndim", 0) == 4:
+            ch = int(p.shape[1])
+        else:
+            ch = 3
         try:
-            # Method 1: Use stride-based input tensor
+            # Method 1: Use stride-based input tensor (YOLO Conv nets scale well with H×W).
+            # RF-DETR exposes model_config; its transformer FLOPs do not scale linearly from a tiny grid.
+            if hasattr(model, "model_config"):
+                raise RuntimeError
             stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32  # max stride
-            im = torch.empty((1, p.shape[1], stride, stride), device=p.device, dtype=p.dtype)  # input image in BCHW
+            im = torch.empty((1, ch, stride, stride), device=p.device, dtype=p.dtype)  # input image in BCHW
             flops = thop.profile(deepcopy(model), inputs=[im], verbose=False)[0] / 1e9 * 2  # stride GFLOPs
             return flops * imgsz[0] / stride * imgsz[1] / stride  # imgsz GFLOPs
         except Exception:
-            # Method 2: Use actual image size (required for RTDETR models)
-            im = torch.empty((1, p.shape[1], *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
+            # Method 2: Use actual image size (required for RTDETR / RF-DETR models)
+            im = torch.empty((1, ch, *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
             return thop.profile(deepcopy(model), inputs=[im], verbose=False)[0] / 1e9 * 2  # imgsz GFLOPs
     except Exception:
         return 0.0

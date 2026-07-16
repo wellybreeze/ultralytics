@@ -159,6 +159,9 @@ extra = [
     "albumentations>=1.4.6", # training augmentations
     "faster-coco-eval>=1.6.7", # COCO mAP
 ]
+rfdetr = [
+    "rfdetr>=1.8.3", # Roboflow RF-DETR backbone/decoder (Apache-2.0)
+]
 typing = [
     "types-pillow",
     "types-psutil",

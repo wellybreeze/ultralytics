@@ -650,6 +650,9 @@ class Exporter:
         if self.args.nms and model.task == "semantic":
             LOGGER.warning("'nms=True' is not valid for semantic segmentation models. Forcing 'nms=False'.")
             self.args.nms = False
+        if fmt == "coreml" and self.args.nms and model.task != "detect":
+            LOGGER.warning("CoreML 'nms=True' is only supported for detect models. Forcing 'nms=False'.")
+            self.args.nms = False
         if self.args.nms:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not is_tf_format or TORCH_1_13, "TensorFlow exports with NMS require torch>=1.13"
@@ -847,16 +850,17 @@ class Exporter:
     def get_int8_calibration_dataloader(self, prefix=""):
         """Build and return a dataloader for calibration of INT8 models."""
         LOGGER.info(f"{prefix} collecting INT8 calibration images from 'data={self.args.data}'")
-        data = (check_cls_dataset if self.model.task == "classify" else check_det_dataset)(self.args.data)
         cfg = deepcopy(self.args)
         cfg.imgsz = max(self.imgsz)
         if self.model.task == "classify":
             import torchvision.transforms as T  # scope for faster 'import ultralytics'
 
+            data = check_cls_dataset(self.args.data)
             dataset = ClassificationDataset(data[self.args.split or "val"], args=cfg, augment=False)
             # INT8 backends divide images by 255, so emit uint8 [0, 255] center-cropped like classify inference
             dataset.torch_transforms = T.Compose([T.Resize(cfg.imgsz), T.CenterCrop(cfg.imgsz), T.PILToTensor()])
         else:
+            data = check_det_dataset(self.args.data, split=self.args.split)
             dataset = build_yolo_dataset(
                 cfg,
                 data[self.args.split or "val"],
@@ -1144,13 +1148,8 @@ class Exporter:
         if f.is_dir():
             shutil.rmtree(f)
 
-        if self.model.task == "detect":
-            model = IOSDetectModel(self.model, self.im, mlprogram=not mlmodel) if self.args.nms else self.model
-        else:
-            if self.args.nms:
-                LOGGER.warning(f"{prefix} 'nms=True' is only available for Detect models like 'yolo26n.pt'.")
-                # TODO CoreML Segment and Pose model pipelining
-            model = self.model
+        # TODO CoreML Segment and Pose model pipelining; 'nms=True' is forced off for non-detect tasks upstream
+        model = IOSDetectModel(self.model, self.im, mlprogram=not mlmodel) if self.args.nms else self.model
 
         if self.args.dynamic:
             input_shape = ct.Shape(
@@ -1171,12 +1170,12 @@ class Exporter:
             im=self.im,
             classifier_names=list(self.model.names.values()) if self.model.task == "classify" else None,
             mlmodel=mlmodel,
-            quantize=self.args.quantize,
+            quantize=16 if self.args.nms and not mlmodel and self.args.quantize is None else self.args.quantize,
             metadata=self.metadata,
             prefix=prefix,
         )
 
-        if self.args.nms and self.model.task == "detect":
+        if self.args.nms:
             ct_model = pipeline_coreml(
                 ct_model,
                 self.output_shape,

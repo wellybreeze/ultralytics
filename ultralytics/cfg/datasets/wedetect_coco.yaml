@@ -12,10 +12,13 @@ train: train2017.txt  # train images (relative to 'path') 118287 images
 val: val2017.txt  # val images (relative to 'path') 5000 images
 test: test-dev2017.txt  # test images (optional)
 
-# Class texts for open-vocabulary detection (optional, overrides names for text encoding)
-# Format: JSON file with list of lists, e.g. [["人"], ["自行车"], ...] or [["aerosol can", "spray can"], ...]
-# When provided, class_texts takes priority over names for generating text embeddings.
-# class_texts: texts/coco_zh_class_texts.json
+# Class texts for open-vocabulary detection (overrides names for text encoding / val prompts).
+# Format: JSON list of lists, e.g. [["人"], ["自行车"], ...] or [["aerosol can", "spray can"], ...].
+# Bundled Chinese COCO template (copy into the dataset root before training):
+#   mkdir -p datasets/coco/texts
+#   cp ultralytics/cfg/datasets/texts/coco_zh_class_texts.json datasets/coco/texts/
+# Or set an absolute path to that template / your own JSON.
+class_texts: texts/coco_zh_class_texts.json
 
 # Classes
 names:

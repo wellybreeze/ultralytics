@@ -807,6 +807,19 @@ def strip_optimizer(f: str | Path = "best.pt", s: str = "", updates: dict[str, A
         x["model"].args = dict(x["model"].args)  # convert from IterableSimpleNamespace to dict
     if hasattr(x["model"], "criterion"):
         x["model"].criterion = None  # strip loss criterion
+
+    # WeDetect: sync text encoder into _text_sd + top-level text_model_weights
+    if hasattr(x["model"], "sync_text_model_weights"):
+        text_weights = x["model"].sync_text_model_weights()
+        if text_weights is not None:
+            x["text_model_weights"] = text_weights
+    elif getattr(x["model"], "_text_sd", None) is not None:
+        from copy import deepcopy
+
+        x["text_model_weights"] = deepcopy(x["model"]._text_sd)
+    elif x.get("text_model_weights") is None:
+        pass  # keep existing key if any
+
     x["model"].half()  # to FP16
     for p in x["model"].parameters():
         p.requires_grad = False

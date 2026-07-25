@@ -35,6 +35,7 @@ project: # (str, optional) project name for results root
 name: # (str, optional) experiment name; results in 'project/name'
 exist_ok: False # (bool) overwrite existing 'project/name' if True
 pretrained: True # (bool | str) use pretrained weights (bool) or load weights from path (str)
+cls_remap: True # (bool) when fine-tuning across datasets, remap pretrained cls head rows by class-name match
 optimizer: AdamW # (str) optimizer: SGD, MuSGD, Adam, Adamax, AdamW, NAdam, RAdam, RMSProp, or auto
 verbose: True # (bool) print verbose logs during training/val
 seed: 0 # (int) random seed for reproducibility
@@ -45,15 +46,27 @@ cos_lr: False # (bool) cosine learning rate scheduler
 close_mosaic: 10 # (int) disable mosaic augmentation for final N epochs (0 to keep enabled)
 resume: False # (bool) resume training from last checkpoint in the run dir
 amp: True # (bool) Automatic Mixed Precision (AMP) training; True runs AMP capability check
-fraction: 1.0 # (float) fraction of training dataset to use (1.0 = all)
+fraction: 1.0 # (float) fraction of training dataset to use (>0.0, 1.0 = all)
 profile: False # (bool) profile ONNX/TensorRT speeds during training for loggers
 freeze: # (int | list, optional) freeze first N layers (int) or specific layer indices (list)
 multi_scale: 0.0 # (float) multi-scale range as a fraction of imgsz; sizes are rounded to stride multiples
 compile: False # (bool | str) enable torch.compile() backend='inductor'; True="default", False=off, or "default|reduce-overhead|max-autotune-no-cudagraphs"
 
-# WeDetect-specific settings -------------------------------------------------------------------------------------------
-freeze_text_encoder: False # (bool) freeze the text encoder (XLM-RoBERTa) during training; True=frozen, False=updated with text_lr_mult
-text_lr_mult: 0.01 # (float) learning rate multiplier for text encoder parameters (original WeDetect: 0.01)
+# WeDetect settings ----------------------------------------------------------------------------------------------------
+freeze_text_encoder: False # (bool) freeze XLM-RoBERTa during training; False=open-vocabulary fine-tuning (update with text_lr_mult)
+text_lr_mult: 0.01 # (float) learning rate multiplier for text encoder when freeze_text_encoder=False
+mix_global_texts: True # (bool) WeDetect: merge multi-dataset class_texts by synonym overlap (category-id agnostic)
+use_neg_queue: False # (bool) WeDetect: shared NegQueue across subsets for dynamic negative class texts
+close_set: False # (bool) close-set fine-tuning: discard text encoder, use cached class embeddings
+mask_refine: False # (bool) refine boxes from segmentation masks (WeDetect mask2bbox); requires segment-format labels
+# Pseudo-label global fallbacks — prefer setting these on the dataset YAML instead
+pseudo_label: False # (bool) used only when dataset YAML omits pseudo_label
+pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / SAM3)
+pseudo_label_classes: "" # (str) teacher class file fallback; empty = COCO names
+pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_zh
+pseudo_label_conf: 0.25 # (float) teacher conf fallback
+pseudo_label_batch: 0 # (int) batch fallback; 0=auto from free VRAM
+pseudo_label_mem_fraction: 0.85 # (float) free-VRAM fraction fallback
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)
@@ -97,23 +110,26 @@ show_boxes: True # (bool) draw bounding boxes on images
 line_width: # (int, optional) line width of boxes; auto-scales with image size if not set
 
 # Export settings ------------------------------------------------------------------------------------------------------
-format: torchscript # (str) target format, e.g. torchscript|onnx|openvino|engine|coreml|saved_model|pb|edgetpu|paddle|mnn|ncnn|imx|rknn|executorch|axelera|deepx|qnn|litert
+format: torchscript # (str) target format, e.g. torchscript|onnx|openvino|engine|coreml|saved_model|pb|edgetpu|paddle|mnn|ncnn|imx|rknn|executorch|axelera|deepx|qnn|litert|hailo
 keras: False # (bool) TF SavedModel only (format=saved_model); enable Keras layers during export
-optimize: False # (bool) TorchScript: mobile optimizations; DEEPX: higher compiler optimization (slower compile, faster inference)
+optimize: False # (bool) DEEPX only; higher compiler optimization (slower compile, faster inference)
 dynamic: False # (bool) dynamic shapes for torchscript, onnx, openvino, engine, coreml; enable variable image sizes
 simplify: True # (bool) ONNX/engine only; run graph simplifier for cleaner ONNX before runtime conversion
 opset: # (int, optional) ONNX/engine only; opset version for export; leave unset to use a tested default
 workspace: # (float, optional) engine (TensorRT) only; workspace size in GiB, e.g. 4
 nms: False # (bool) fuse NMS into exported model when backend supports; if True, conf/iou apply (agnostic_nms except coreml)
+export_mode: dual # (str) WeDetect ONNX layout: dual (vision+language) or whole (fused); tokenizer stays in Python
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.0005 # (float) initial learning rate (SGD=1e-2, Adam/AdamW=1e-3)
 lrf: 0.01 # (float) final LR fraction; final LR = lr0 * lrf
 momentum: 0.937 # (float) SGD momentum or Adam beta1
 weight_decay: 0.025 # (float) weight decay (L2 regularization)
-warmup_epochs: 3.0 # (float) warmup epochs (fractions allowed)
+warmup_epochs: 3.0 # (float) warmup epochs (fractions allowed); ignored when warmup_iters > 0
+warmup_iters: 0 # (int) iteration-based warmup; if >0 overrides warmup_epochs (WeDetect finetune: 1000)
 warmup_momentum: 0.8 # (float) initial momentum during warmup
-warmup_bias_lr: 0.1 # (float) bias learning rate during warmup
+warmup_bias_lr: 0.1 # (float) bias learning rate during warmup (ignored when warmup_start_factor > 0)
+warmup_start_factor: 0.0 # (float) start LR = factor * initial_lr for all groups when >0 (WeDetect finetune: 0.001)
 distill_model: # (str, optional) path to teacher model for knowledge distillation
 dis: 6.0 # (float) distillation loss weight
 box: 7.5 # (float) box loss gain

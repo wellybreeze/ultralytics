@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import torch
-
 from ultralytics.models.yolo.detect import DetectionPredictor
-from ultralytics.utils import ops
 
 
 class WeDetectPredictor(DetectionPredictor):
@@ -15,6 +12,9 @@ class WeDetectPredictor(DetectionPredictor):
     names.  When the model's current class names differ from the
     requested classes, regenerates text embeddings using XLM-RoBERTa
     and updates the model's class list.
+
+    For dual-tower ONNX deployment with custom prompts, see
+    ``examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py``.
     """
 
     def pre_transform(self, im):

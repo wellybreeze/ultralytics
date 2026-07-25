@@ -14,8 +14,10 @@ from .qnn import onnx2qnn
 from .rknn import onnx2rknn
 from .tensorflow import keras2pb, onnx2saved_model, tflite2edgetpu
 from .torchscript import torch2torchscript
+from .wedetect import export_wedetect_onnx
 
 __all__ = [
+    "export_wedetect_onnx",
     "keras2pb",
     "onnx2deepx",
     "onnx2engine",

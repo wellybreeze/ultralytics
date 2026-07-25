@@ -513,13 +513,38 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
     data["names"] = check_class_names(data["names"])
     data["channels"] = data.get("channels", 3)  # get image channels, default to 3
 
-    # Resolve class_texts path (WeDetect open-vocabulary datasets)
+    # Resolve class_texts (WeDetect OV). Relative paths are resolved against:
+    #   1) YAML file directory (shipped next to the dataset yaml)
+    #   2) dataset ``path`` root
+    #   3) ultralytics cfg texts / customer dirs
+    #   4) DATASETS_DIR
+    # Prefer sibling ``*_train.json`` when present (pseudo-label merged vocab).
     if data.get("class_texts"):
-        ct = Path(data["class_texts"])
+        raw_ct = str(data["class_texts"])
+        ct = Path(raw_ct)
         if not ct.is_absolute():
-            ct = (Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent) / ct).resolve()
-            if not ct.exists() and not str(ct).startswith(str(DATASETS_DIR)):
-                ct = (DATASETS_DIR / data["class_texts"]).resolve()
+            yaml_dir = Path(data["yaml_file"]).parent if data.get("yaml_file") else None
+            ds_root = Path(extract_dir) if extract_dir else (Path(data["path"]) if data.get("path") else None)
+            candidates = []
+            if yaml_dir is not None:
+                candidates.append(yaml_dir / ct)
+            if ds_root is not None:
+                candidates.append(ds_root / ct)
+            candidates.append(ROOT / "cfg" / "datasets" / "texts" / ct.name)
+            candidates.append(ROOT / "cfg" / "datasets" / "customer" / ct.name)
+            candidates.append(DATASETS_DIR / ct)
+            hit = next((c.resolve() for c in candidates if c.exists()), None)
+            ct = hit if hit is not None else (candidates[0].resolve() if candidates else ct.resolve())
+        if not ct.stem.endswith("_train"):
+            train_ct = ct.with_name(f"{ct.stem}_train{ct.suffix}")
+            if train_ct.exists():
+                LOGGER.info(f"Using train class_texts '{train_ct}' (overrides '{ct.name}')")
+                ct = train_ct
+        if not ct.exists():
+            LOGGER.warning(
+                f"class_texts '{raw_ct}' not found (tried yaml-dir / dataset path / cfg / DATASETS_DIR); "
+                f"last candidate '{ct}'"
+            )
         data["class_texts"] = str(ct)
 
     # Resolve paths

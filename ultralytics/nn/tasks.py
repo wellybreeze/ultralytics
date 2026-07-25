@@ -1561,6 +1561,48 @@ class WeDetectModel(DetectionModel):
             LOGGER.info(f"\n{'':>3}WeDetect-{self.model_size} summary: {len(list(model.modules()))} layers")
         return model, save
 
+    def load(self, weights, verbose=True):
+        """Load vision weights and copy WeDetect text-encoder side-channel weights.
+
+        Extends ``BaseModel.load`` to also transfer ``_text_sd`` (and optional
+        top-level ``text_model_weights``) so open-vocabulary fine-tuning /
+        export initializes XLM-RoBERTa from WeDetect checkpoints rather than
+        a bare HuggingFace backbone.
+        """
+        from copy import deepcopy
+
+        super().load(weights, verbose=verbose)
+        src = weights["model"] if isinstance(weights, dict) else weights
+        text_sd = None
+        if isinstance(weights, dict) and weights.get("text_model_weights"):
+            text_sd = weights["text_model_weights"]
+        if text_sd is None and hasattr(src, "_text_sd") and getattr(src, "_text_sd") is not None:
+            text_sd = src._text_sd
+        if text_sd is not None:
+            self._text_sd = deepcopy(text_sd)
+
+    def sync_text_model_weights(self):
+        """Sync live text-encoder weights into ``_text_sd`` for checkpoint I/O.
+
+        Exports ``model.*`` / ``head.*`` keys matching the pretrained
+        ``text_model_weights`` layout so save/load/export share one source of truth.
+        """
+        from copy import deepcopy
+
+        encoder = getattr(self, "text_model", None)
+        if not isinstance(encoder, nn.Module):
+            encoder = getattr(self, "clip_model", None)
+        if not isinstance(encoder, nn.Module):
+            return getattr(self, "_text_sd", None)
+        sd = {}
+        if hasattr(encoder, "model"):
+            sd.update({f"model.{k}": v.detach().float().cpu() for k, v in encoder.model.state_dict().items()})
+        if hasattr(encoder, "head"):
+            sd.update({f"head.{k}": v.detach().float().cpu() for k, v in encoder.head.state_dict().items()})
+        if sd:
+            self._text_sd = deepcopy(sd)
+        return self._text_sd
+
     def set_classes(self, text, batch=80, cache_clip_model=True):
         """Set classes for offline inference.
 
@@ -1570,7 +1612,18 @@ class WeDetectModel(DetectionModel):
             cache_clip_model (bool): Whether to cache the text model.
         """
         self.txt_feats = self.get_text_pe(text, batch=batch, cache_text_model=cache_clip_model)
-        self.model[-1].nc = len(text) + 1
+        self.model[-1].nc = len(text)
+
+    def ensure_text_model(self):
+        """Build and attach the text encoder if it is not already loaded."""
+        from ultralytics.nn.text_model import build_text_model
+
+        existing = getattr(self, "text_model", None)
+        if isinstance(existing, nn.Module) or getattr(self, "clip_model", None) is not None:
+            return
+        device = next(self.model.parameters()).device
+        text_sd = getattr(self, "_text_sd", None)
+        self.clip_model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
 
     def register_text_model(self):
         """Register the text encoder as a submodule so its parameters participate in training.
@@ -1584,19 +1637,42 @@ class WeDetectModel(DetectionModel):
         ``clip_model``) so that optimizer parameter groups can reliably match
         text-encoder parameters by the ``text_model.`` prefix.
         """
+        self.ensure_text_model()
         clip = getattr(self, "clip_model", None)
         if clip is None:
-            return
-        if hasattr(self, "text_model"):
-            return
+            return getattr(self, "text_model", None)
+        # Avoid treating a previously registered Module as missing; only skip if already a Module
+        existing = getattr(self, "text_model", None)
+        if isinstance(existing, nn.Module):
+            return existing
         del self.clip_model
         self.add_module("text_model", clip)
+        self.text_model.train()
+        for p in self.text_model.parameters():
+            p.requires_grad = True
+        return self.text_model
+
+    def encode_texts(self, texts):
+        """Encode nested batch texts online through the registered text encoder.
+
+        Args:
+            texts (list[list[str]]): Per-image class text lists from ``RandomLoadText``.
+
+        Returns:
+            (torch.Tensor): Text features of shape ``(batch, num_classes, embed_dim)``.
+        """
+        text_encoder = getattr(self, "text_model", None)
+        if not isinstance(text_encoder, nn.Module):
+            text_encoder = self.register_text_model()
+        if text_encoder is None:
+            self.ensure_text_model()
+            text_encoder = getattr(self, "text_model", None) or self.clip_model
+        txt_feats = text_encoder.encode_text(texts)  # (1, B*N, D)
+        b = len(texts)
+        return txt_feats.reshape(b, -1, txt_feats.shape[-1])
 
     def get_text_pe(self, text, batch=80, cache_text_model=True):
         """Get text positional embeddings using XLM-RoBERTa.
-
-        A " " (space) placeholder is appended to match the original WeDetect
-        convention where the last text slot represents "no class".
 
         Args:
             text (list[str]): List of class names.
@@ -1604,19 +1680,30 @@ class WeDetectModel(DetectionModel):
             cache_text_model (bool): Whether to cache the text model.
 
         Returns:
-            (torch.Tensor): Text positional embeddings, shape (1, num_classes+1, embed_dim).
+            (torch.Tensor): Text positional embeddings, shape (1, num_classes, embed_dim).
         """
         from ultralytics.nn.text_model import build_text_model
 
         device = next(self.model.parameters()).device
         text_sd = getattr(self, "_text_sd", None)
-        cached = getattr(self, "text_model", None) or getattr(self, "clip_model", None)
-        if not cached and cache_text_model:
+        cached = getattr(self, "text_model", None) if isinstance(getattr(self, "text_model", None), nn.Module) else None
+        cached = cached or getattr(self, "clip_model", None)
+        if cached is not None:
+            model = cached
+        elif cache_text_model:
             self.clip_model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
-            cached = self.clip_model
-        model = cached if cache_text_model else build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
-        all_texts = list(text) + [" "]
-        txt_feats = model.encode_text([all_texts])
+            model = self.clip_model
+        else:
+            model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
+        # Match training / original test LoadText: only the requested class prompts (no extra slot)
+        all_texts = list(text)
+        was_training = model.training
+        model.eval()
+        try:
+            txt_feats = model.encode_text([all_texts])
+        finally:
+            if was_training:
+                model.train()
         return txt_feats.reshape(-1, len(all_texts), txt_feats.shape[-1])
 
     def predict(self, x, profile=False, visualize=False, txt_feats=None, augment=False, embed=None):
@@ -1643,6 +1730,11 @@ class WeDetectModel(DetectionModel):
     def loss(self, batch, preds=None):
         """Compute loss.
 
+        When ``txt_feats`` is absent but ``texts`` is present (open-vocabulary
+        fine-tuning), text features are encoded online so gradients update the
+        language model. Encoding runs inside ``loss`` (called via DDP forward)
+        so DistributedDataParallel correctly tracks text-encoder parameters.
+
         Args:
             batch (dict): Batch to compute loss on.
             preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
@@ -1650,7 +1742,20 @@ class WeDetectModel(DetectionModel):
         if not hasattr(self, "criterion"):
             self.criterion = self.init_criterion()
         if preds is None:
-            preds = self.forward(batch["img"], txt_feats=batch["txt_feats"])
+            txt_feats = batch.get("txt_feats")
+            if txt_feats is None and batch.get("texts") is not None:
+                txt_feats = self.encode_texts(batch["texts"])
+                batch["txt_feats"] = txt_feats
+            preds = self.forward(batch["img"], txt_feats=txt_feats)
+        # OV batches: scores width == len(texts) (e.g. 80), which may exceed data nc
+        # (e.g. nc=1 with expanded negative vocabulary). TAL scatter requires matching.
+        out = preds[1] if isinstance(preds, tuple) else preds
+        if isinstance(out, dict) and "scores" in out:
+            ncls = int(out["scores"].shape[1])
+            if getattr(self.criterion, "nc", None) != ncls:
+                self.criterion.nc = ncls
+                self.criterion.assigner.num_classes = ncls
+                self.model[-1].nc = ncls
         return self.criterion(preds, batch)
 
 
@@ -2231,6 +2336,12 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
     model.task = getattr(model, "task", guess_model_task(model))
     if not hasattr(model, "stride"):
         model.stride = torch.tensor([32.0])
+
+    # WeDetect: restore text-encoder side-channel if missing on the pickled module
+    if getattr(model, "_text_sd", None) is None and ckpt.get("text_model_weights"):
+        from copy import deepcopy
+
+        model._text_sd = deepcopy(ckpt["text_model_weights"])
 
     model = (model.fuse() if fuse and hasattr(model, "fuse") else model).eval().to(device)  # model in eval mode
 

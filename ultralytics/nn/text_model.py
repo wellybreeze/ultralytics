@@ -418,10 +418,11 @@ class XLMRoberta(TextModel):
                 self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
                 self.model = XLMRobertaModel.from_pretrained(model_name, local_files_only=True)
         except OSError:
-            save_dir = os.path.join(_root, model_name)
-            os.makedirs(save_dir, exist_ok=True)
+            # Download first, then save — creating save_dir early makes HF treat the empty
+            # folder as a local model path and breaks tokenizer load on retry.
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.model = XLMRobertaModel.from_pretrained(model_name)
+            save_dir = os.path.join(_root, model_name)
             self.tokenizer.save_pretrained(save_dir)
             self.model.save_pretrained(save_dir)
         self.head = nn.Linear(cfg["hidden"], cfg["embed"], bias=True)
@@ -434,8 +435,15 @@ class XLMRoberta(TextModel):
             if head_sd:
                 self.head.load_state_dict(head_sd)
         self.to(device)
-        self.device = device
-        self.eval()
+        self.device = torch.device(device) if device is not None else next(self.parameters()).device
+        self.eval()  # default inference; call .train() for open-vocabulary fine-tuning
+
+    def _input_device(self) -> torch.device:
+        """Return the live parameter device (keeps tokens/buffers aligned after .to()/EMA)."""
+        device = next(self.model.parameters()).device
+        if self.device != device:
+            self.device = device
+        return device
 
     def tokenize(self, texts, truncate: bool = True) -> dict:
         """Convert input texts to XLM-RoBERTa token dicts.
@@ -452,14 +460,18 @@ class XLMRoberta(TextModel):
 
         flat = list(itertools.chain(*texts)) if texts and isinstance(texts[0], (list, tuple)) else texts
         encoded = self.tokenizer(text=flat, return_tensors="pt", padding=True, truncation=truncate, max_length=77)
-        return {k: v.to(self.device) for k, v in encoded.items()}
+        device = self._input_device()
+        return {k: v.to(device) for k, v in encoded.items()}
 
-    @smart_inference_mode()
     def encode_text(self, texts, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Encode tokenized texts into normalized feature vectors.
 
         Accepts either a tokenizer output dict (from :meth:`tokenize`) or a
         nested list of strings that will be tokenized on the fly.
+
+        When the module is in ``train()`` mode, gradients flow through the encoder
+        (required for open-vocabulary fine-tuning). In ``eval()`` mode, encoding
+        runs under inference mode for speed.
 
         Args:
             texts (dict | list): Tokenizer output dict or nested text list.
@@ -468,17 +480,32 @@ class XLMRoberta(TextModel):
         Returns:
             (torch.Tensor): Normalized text features, shape ``(1, num_classes, embed_dim)``.
         """
+        if self.training:
+            return self._encode_text(texts, dtype)
+        with torch.inference_mode():
+            return self._encode_text(texts, dtype)
+
+    def _encode_text(self, texts, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Internal text encoding without inference-mode wrapping."""
         import itertools
 
+        device = self._input_device()
+        # HF RoBERTa keeps int buffers (e.g. token_type_ids); ensure they track params after EMA/.to()
+        for buf in self.model.buffers():
+            if buf.device != device:
+                self.model.to(device)
+                self.head.to(device)
+                break
+
         if isinstance(texts, dict):
-            encoded = {k: v.to(self.device) for k, v in texts.items()}
+            encoded = {k: v.to(device) for k, v in texts.items()}
             num_classes = encoded["input_ids"].shape[0]
         else:
             is_nested = texts and isinstance(texts[0], (list, tuple))
             flat = list(itertools.chain(*texts)) if is_nested else list(texts)
             num_classes = len(flat)
             encoded = self.tokenizer(text=flat, return_tensors="pt", padding=True, truncation=True, max_length=77)
-            encoded = {k: v.to(self.device) for k, v in encoded.items()}
+            encoded = {k: v.to(device) for k, v in encoded.items()}
 
         outputs = self.model(**encoded)
         txt_feats = outputs.last_hidden_state[:, 0]

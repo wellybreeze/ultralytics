@@ -455,6 +455,11 @@ class WeDetect(Model):
     encoder for open-vocabulary object detection.  It supports multilingual
     prompts out of the box.
 
+    Export (dynamic open-vocabulary, aligned with WeDetect/deploy)::
+
+        model.export(format="onnx", export_mode="dual")   # *_vision.onnx + *_language.onnx
+        model.export(format="onnx", export_mode="whole")  # *_whole.onnx
+
     Attributes:
         model: The loaded WeDetect model instance.
         task: Always set to 'detect'.

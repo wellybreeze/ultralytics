@@ -93,7 +93,7 @@ from ultralytics.nn.modules import (
     Segment26,
     SemanticSegment,
 )
-from ultralytics.nn.tasks import ClassificationModel, DetectionModel, SegmentationModel, WorldModel
+from ultralytics.nn.tasks import ClassificationModel, DetectionModel, SegmentationModel, WeDetectModel, WorldModel
 from ultralytics.utils import (
     ARM64,
     DEFAULT_CFG,
@@ -751,6 +751,23 @@ class Exporter:
                 "See https://docs.ultralytics.com/models/yolo-world for details."
             )
             model.clip_model = None  # openvino int8 export error: https://github.com/ultralytics/ultralytics/pull/18445
+
+        # WeDetect dual-tower dynamic open-vocabulary ONNX export (aligned with WeDetect/deploy)
+        if isinstance(model, WeDetectModel) and fmt == "onnx":
+            export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
+            if export_mode in {"dual", "whole"}:
+                self.file = Path(
+                    getattr(model, "pt_path", None) or getattr(model, "yaml_file", None) or model.yaml.get("yaml_file", "")
+                )
+                if self.file.suffix in {".yaml", ".yml"}:
+                    self.file = Path(self.file.name)
+                self.imgsz = check_imgsz(self.args.imgsz, stride=model.stride, min_dim=2)
+                self.model = model
+                self.run_callbacks("on_export_start")
+                f = self.export_wedetect_onnx()
+                self.run_callbacks("on_export_end")
+                return str(f)
+
         if self.args.quantize in {8, "w8a16"} and not self.args.data:
             self.args.data = DEFAULT_CFG.data or TASK2DATA[getattr(model, "task", "detect")]  # assign default data
             LOGGER.warning(
@@ -1067,6 +1084,36 @@ class Exporter:
             )
             source.unlink(missing_ok=True)
         return f
+
+    @try_export
+    def export_wedetect_onnx(self, prefix=colorstr("WeDetect ONNX:")):
+        """Export WeDetect dual-tower (or whole) ONNX graphs for dynamic open-vocabulary inference."""
+        requirements = ["onnx>=1.12.0,<2.0.0"]
+        if self.args.simplify:
+            ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
+            requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
+        check_requirements(requirements)
+        import onnx  # noqa: F401
+
+        from ultralytics.utils.export.engine import best_onnx_opset
+        from ultralytics.utils.export.wedetect import export_wedetect_onnx
+
+        opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type)
+        opset = max(int(opset), 17)  # align with original WeDetect deploy default
+        export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        paths = export_wedetect_onnx(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            export_mode=export_mode,
+            opset=opset,
+            simplify=bool(self.args.simplify),
+            device=self.device,
+            prefix=prefix,
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
 
     @try_export
     def export_openvino(self, prefix=colorstr("OpenVINO:")):

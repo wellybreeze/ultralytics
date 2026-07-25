@@ -407,15 +407,50 @@ class BaseMixTransform(BaseTransform):
         if "texts" not in labels:
             return labels
 
-        mix_texts = [*labels["texts"], *(item for x in labels["mix_labels"] for item in x["texts"])]
-        mix_texts = list({tuple(x) for x in mix_texts})
-        text2id = {text: i for i, text in enumerate(mix_texts)}
+        def _as_group(text) -> tuple[str, ...]:
+            """Normalize a text entry to a synonym tuple (supports str or list)."""
+            if isinstance(text, str):
+                return (text,)
+            return tuple(text)
+
+        raw_groups = [_as_group(t) for t in labels["texts"]]
+        for x in labels.get("mix_labels") or []:
+            raw_groups.extend(_as_group(t) for t in x.get("texts", []))
+
+        # Merge synonym groups that share any string (case-insensitive), matching
+        # original WeDetect text-as-id mixing across category-inconsistent sources.
+        merged: list[list[str]] = []
+        key_sets: list[set[str]] = []
+        for g in raw_groups:
+            keys = {str(s).strip().lower() for s in g if str(s).strip()}
+            if not keys:
+                continue
+            hit = next((i for i, ks in enumerate(key_sets) if ks & keys), None)
+            if hit is None:
+                key_sets.append(keys)
+                merged.append([str(s) for s in g])
+                continue
+            key_sets[hit] |= keys
+            seen = {str(s).strip().lower() for s in merged[hit]}
+            for s in g:
+                sl = str(s).strip().lower()
+                if sl and sl not in seen:
+                    merged[hit].append(str(s))
+                    seen.add(sl)
+
+        syn2id = {k: i for i, ks in enumerate(key_sets) for k in ks}
 
         for label in [labels] + labels["mix_labels"]:
             for i, cls in enumerate(label["cls"].squeeze(-1).tolist()):
-                text = label["texts"][int(cls)]
-                label["cls"][i] = text2id[tuple(text)]
-            label["texts"] = mix_texts
+                group = _as_group(label["texts"][int(cls)])
+                gid = 0
+                for s in group:
+                    found = syn2id.get(str(s).strip().lower())
+                    if found is not None:
+                        gid = found
+                        break
+                label["cls"][i] = gid
+            label["texts"] = merged
         return labels
 
 
@@ -2646,19 +2681,22 @@ class RandomLoadText(BaseTransform):
         assert "texts" in labels, "No texts found in labels."
         class_texts = labels["texts"]
         num_classes = len(class_texts)
+        # Dynamic cap so global-vocab attach after dataset init still samples correctly
+        max_samples = min(max(num_classes, 1), self.max_samples)
         cls = np.asarray(labels.pop("cls"), dtype=int)
         pos_labels = np.unique(cls).tolist()
 
-        if len(pos_labels) > self.max_samples:
-            pos_labels = random.sample(pos_labels, k=self.max_samples)
+        if len(pos_labels) > max_samples:
+            pos_labels = random.sample(pos_labels, k=max_samples)
 
-        neg_samples = min(min(num_classes, self.max_samples) - len(pos_labels), random.randint(*self.neg_samples))
+        neg_samples = min(min(num_classes, max_samples) - len(pos_labels), random.randint(*self.neg_samples))
+        neg_samples = max(neg_samples, 0)
         neg_labels = [i for i in range(num_classes) if i not in pos_labels]
-        neg_labels = random.sample(neg_labels, k=neg_samples)
+        neg_labels = random.sample(neg_labels, k=neg_samples) if neg_samples else []
 
         sampled_labels = pos_labels + neg_labels
-        # Randomness
-        # random.shuffle(sampled_labels)
+        # Randomness (matches original WeDetect / mmdet RandomLoadText)
+        random.shuffle(sampled_labels)
 
         label2ids = {label: i for i, label in enumerate(sampled_labels)}
         valid_idx = np.zeros(len(labels["instances"]), dtype=bool)
@@ -2679,11 +2717,11 @@ class RandomLoadText(BaseTransform):
 
         if self.padding:
             valid_labels = len(pos_labels) + len(neg_labels)
-            num_padding = self.max_samples - valid_labels
+            num_padding = max_samples - valid_labels
             if num_padding > 0:
                 texts += random.choices(self.padding_value, k=num_padding)
 
-        assert len(texts) == self.max_samples
+        assert len(texts) == max_samples
 
         return {"valid_idx": valid_idx, "new_cls": np.array(new_cls), "texts": texts}
 

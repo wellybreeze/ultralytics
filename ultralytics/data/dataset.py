@@ -89,7 +89,16 @@ class YOLODataset(BaseDataset):
         self.use_obb = task == "obb"
         self.data = data
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+        # BaseDataset does not store hyp on self; read mask_refine from the constructor arg.
+        hyp = kwargs.get("hyp")
+        if isinstance(hyp, dict):
+            self.mask_refine = bool(hyp.get("mask_refine", False))
+        else:
+            self.mask_refine = bool(getattr(hyp, "mask_refine", False)) if hyp is not None else False
         super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
+        # WeDetect open-vocabulary mask refine (original mask2bbox): keep segments to refine boxes
+        if self.mask_refine and RANK in {-1, 0}:
+            LOGGER.info(f"{self.prefix}mask_refine=True: refining boxes from segments when available")
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
         """Cache dataset labels, check images and read shapes.
@@ -169,14 +178,34 @@ class YOLODataset(BaseDataset):
         Returns:
             (list[dict]): List of label dictionaries, each containing information about an image and its annotations.
         """
-        self.label_files = img2label_paths(self.im_files)
+        label_dir = (self.data or {}).get("labels_dir") or "labels"
+        self.label_files = img2label_paths(self.im_files, label_dir=str(label_dir))
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+        is_pseudo_merged = str(label_dir) == "labels_pseudo_merged"
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
-            assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
+            if is_pseudo_merged:
+                from ultralytics.models.yolo.wedetect.pseudo_label import (
+                    _dataset_root,
+                    merged_cache_hash,
+                    remap_label_im_files,
+                )
+
+                root = _dataset_root(self.data or {}, self.im_files)
+                assert cache["hash"] == merged_cache_hash(self.im_files, root=root)
+                cache["labels"] = remap_label_im_files(list(cache.get("labels") or []), self.im_files, root)
+            else:
+                assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
         except (FileNotFoundError, AssertionError, AttributeError, ModuleNotFoundError):
-            cache, exists = self.cache_labels(cache_path), False  # run cache ops
+            # WeDetect pseudo: merged labels live only in *.cache (no per-image txt). Rebuild from
+            # pseudo_labels.cache + GT instead of scanning empty labels_pseudo_merged/*.txt.
+            if is_pseudo_merged:
+                from ultralytics.models.yolo.wedetect.pseudo_label import rebuild_merged_pseudo_cache
+
+                cache, exists = rebuild_merged_pseudo_cache(self.data or {}, self.im_files), False
+            else:
+                cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
@@ -276,6 +305,11 @@ class YOLODataset(BaseDataset):
         bbox_format = label.pop("bbox_format")
         normalized = label.pop("normalized")
 
+        # WeDetect mask refine: replace boxes with segment-derived boxes (mask2bbox)
+        if getattr(self, "mask_refine", False) and len(segments):
+            bboxes = segments2boxes(segments)
+            bbox_format = "xywh"
+
         # NOTE: do NOT resample oriented boxes
         segment_resamples = 100 if self.use_obb else 1000
         if len(segments) > 0:
@@ -332,16 +366,24 @@ class _NegQueue:
         self.size = size
         self.queue: set[str] = set()
 
-    def update(self, data: list[str]) -> None:
-        flat = [x for x in data if isinstance(x, str)]
+    def update(self, data: list[str] | list[list[str]]) -> None:
+        """Update the queue from flat strings or synonym groups."""
+        flat: list[str] = []
+        for x in data:
+            if isinstance(x, str):
+                s = x.strip()
+                if s:
+                    flat.append(s)
+            elif isinstance(x, (list, tuple)):
+                flat.extend(str(t).strip() for t in x if str(t).strip())
         self.queue.update(flat)
         if len(self.queue) > self.size:
             self.queue = set(random.sample(list(self.queue), self.size))
         self.queue.discard("object")
 
     def enrich(self, class_texts: list[list[str]]) -> list[list[str]]:
-        known = {xx for x in class_texts for xx in x}
-        return class_texts + [[s] for s in self.queue - known]
+        known = {xx.strip().lower() for x in class_texts for xx in x}
+        return class_texts + [[s] for s in self.queue if s.strip().lower() not in known]
 
 
 class YOLOMultiModalDataset(YOLODataset):
@@ -373,14 +415,22 @@ class YOLOMultiModalDataset(YOLODataset):
             *args (Any): Additional positional arguments for the parent class.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
-        super().__init__(*args, data=data, task=task, **kwargs)
+        # Must init before super(): BaseDataset.__init__ → build_transforms → _active_texts
         self._class_texts = self._load_class_texts(data or {})
         self._neg_queue: _NegQueue | None = None
         self._global_texts: list[list[str]] | None = None
         self._local_to_global: dict[int, int] | None = None
+        # Optional WeDetect-style dynamic negatives (shared across concat via attach_shared_neg_queue)
+        self.use_neg_queue = bool((data or {}).get("use_neg_queue", False))
+        super().__init__(*args, data=data, task=task, **kwargs)
 
     def _load_class_texts(self, data: dict) -> list[list[str]] | None:
-        """Load class texts from external JSON file or return None to use data.names fallback."""
+        """Load class texts from external JSON file or return None to use data.names fallback.
+
+        Entries beyond ``nc`` are kept as open-vocabulary negative vocabulary (original
+        WeDetect does not truncate ``class_texts`` to the annotated class count).
+        Label ids must still index valid rows (``0 .. len(class_texts)-1``).
+        """
         path_str = data.get("class_texts")
         if not path_str:
             return None
@@ -394,12 +444,19 @@ class YOLOMultiModalDataset(YOLODataset):
             raw = json.load(f)
         if not isinstance(raw, list) or len(raw) == 0:
             return None
-        nc = data.get("nc", 0)
-        parsed = [[s.strip() for s in (x if isinstance(x, list) else [x])] for x in raw]
+        nc = int(data.get("nc", 0) or 0)
+        parsed = [[s.strip() for s in (x if isinstance(x, list) else [x]) if str(s).strip()] for x in raw]
+        parsed = [row for row in parsed if row]
         LOGGER.info(f"Loaded class_texts from '{p}' ({len(parsed)} classes)")
-        if nc > 0 and len(parsed) != nc:
-            LOGGER.warning(f"class_texts count ({len(parsed)}) != nc ({nc}), truncating to {min(len(parsed), nc)}")
-            parsed = parsed[: min(len(parsed), nc)]
+        if nc > 0 and len(parsed) < nc:
+            LOGGER.warning(
+                f"class_texts count ({len(parsed)}) < nc ({nc}); missing classes will fall back at runtime"
+            )
+        elif nc > 0 and len(parsed) > nc:
+            LOGGER.info(
+                f"class_texts has {len(parsed) - nc} extra entries beyond nc={nc} "
+                f"(kept as OV negative vocabulary; not truncated)"
+            )
         return parsed
 
     @property
@@ -430,6 +487,15 @@ class YOLOMultiModalDataset(YOLODataset):
             f"{len(local_to_global)} local→global mappings) for dataset '{self.img_path}'"
         )
 
+    def refresh_text_transforms(self, max_samples: int = 80) -> None:
+        """Update ``RandomLoadText.max_samples`` after global texts are attached."""
+        if not getattr(self, "transforms", None) or not self.augment:
+            return
+        n = min(len(self._active_texts), max_samples)
+        for t in self.transforms.transforms:
+            if isinstance(t, RandomLoadText):
+                t.max_samples = n
+
     @property
     def _active_texts(self) -> list[list[str]]:
         """Return global texts if set, otherwise local class texts."""
@@ -440,7 +506,8 @@ class YOLOMultiModalDataset(YOLODataset):
 
         When global texts are set, remaps local class IDs to global IDs and
         provides the global text list so that RandomLoadText samples from the
-        unified vocabulary across all datasets.
+        unified vocabulary across all datasets. Optional ``use_neg_queue`` enriches
+        the per-image text list with a shared negative queue (original WeDetect).
 
         Args:
             label (dict): Label dictionary containing bboxes, segments, keypoints, etc.
@@ -449,10 +516,14 @@ class YOLOMultiModalDataset(YOLODataset):
             (dict): Updated label dictionary with instances and texts.
         """
         labels = super().update_labels_info(label)
-        labels["texts"] = self._active_texts
+        texts = [list(t) for t in self._active_texts]
         if self._local_to_global is not None:
             cls = labels["cls"].flatten().astype(int)
             labels["cls"] = np.array([self._local_to_global.get(c, c) for c in cls]).reshape(labels["cls"].shape)
+        if self.use_neg_queue and self.augment:
+            texts = self.neg_queue.enrich(texts)
+            self.neg_queue.update(texts)
+        labels["texts"] = texts
         return labels
 
     def build_transforms(self, hyp: dict | None = None) -> Compose:
@@ -466,10 +537,15 @@ class YOLOMultiModalDataset(YOLODataset):
         """
         transforms = super().build_transforms(hyp)
         if self.augment:
+            # Enable NegQueue from hyp/args when building transforms (trainer may also attach shared queue)
+            if hyp is not None and bool(getattr(hyp, "use_neg_queue", False) or (isinstance(hyp, dict) and hyp.get("use_neg_queue"))):
+                self.use_neg_queue = True
+            # WeDetect / original RandomLoadText: pad unused slots with empty string.
+            # YOLO-World callers that need frequency-based negatives can pass padding_value explicitly.
             transform = RandomLoadText(
-                max_samples=min(len(self._active_texts), 80),
+                max_samples=min(max(len(self._active_texts), 1), 80),
                 padding=True,
-                padding_value=self._get_neg_texts(self.category_freq),
+                padding_value=[""],
             )
             transforms.insert(-1, transform)
         return transforms
@@ -510,6 +586,99 @@ class YOLOMultiModalDataset(YOLODataset):
             return [""]
         threshold = min(max(category_freq.values()), 100)
         return [k for k, v in category_freq.items() if v >= threshold]
+
+
+def build_global_class_texts(datasets: list) -> list[list[str]]:
+    """Merge per-dataset class texts into a shared open-vocabulary table.
+
+    Synonym groups that share any string (case-insensitive) are unioned so that
+    inconsistent local ids (e.g. dataset A ``0=车``, dataset B ``2=汽车``) map to
+    the same global class. Mirrors original WeDetect ``WeConcatDataset.init_texts``
+    intent while keeping Ultralytics ``list[list[str]]`` training format.
+
+    Args:
+        datasets: Dataset instances; only ``YOLOMultiModalDataset`` participate.
+
+    Returns:
+        (list[list[str]]): Unified global class texts. Empty if fewer than two
+            multimodal datasets (caller should keep local texts).
+    """
+    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
+    if len(multimodal) < 2:
+        for ds in multimodal:
+            LOGGER.info(f"Single dataset '{ds.img_path}', using local class_texts ({len(ds.class_texts)} classes)")
+        return []
+
+    global_texts: list[list[str]] = []
+    key_sets: list[set[str]] = []
+
+    def _keys(ct: list[str]) -> set[str]:
+        return {s.strip().lower() for s in ct if str(s).strip()}
+
+    for ds in multimodal:
+        for ct in ds.class_texts:
+            keys = _keys(ct)
+            if not keys:
+                continue
+            hits = [i for i, ks in enumerate(key_sets) if ks & keys]
+            if not hits:
+                key_sets.append(keys)
+                global_texts.append([str(s).strip() for s in ct if str(s).strip()])
+                continue
+            main = hits[0]
+            for h in sorted(hits[1:], reverse=True):
+                key_sets[main] |= key_sets[h]
+                seen = {x.strip().lower() for x in global_texts[main]}
+                for s in global_texts[h]:
+                    if s.strip().lower() not in seen:
+                        global_texts[main].append(s)
+                        seen.add(s.strip().lower())
+                del key_sets[h]
+                del global_texts[h]
+            key_sets[main] |= keys
+            seen = {x.strip().lower() for x in global_texts[main]}
+            for s in ct:
+                s = str(s).strip()
+                if s and s.lower() not in seen:
+                    global_texts[main].append(s)
+                    seen.add(s.lower())
+
+    for ds in multimodal:
+        local_to_global: dict[int, int] = {}
+        for local_id, texts in enumerate(ds.class_texts):
+            keys = _keys(texts)
+            matched = next((i for i, ks in enumerate(key_sets) if ks & keys), None)
+            if matched is None:
+                matched = len(global_texts)
+                key_sets.append(keys)
+                global_texts.append([str(s).strip() for s in texts if str(s).strip()])
+            local_to_global[local_id] = matched
+        ds.set_global_texts(global_texts, local_to_global)
+        ds.refresh_text_transforms()
+
+    total_local = sum(len(ds.class_texts) for ds in multimodal)
+    LOGGER.info(
+        f"Global text vocab: {len(global_texts)} unique classes "
+        f"from {len(multimodal)} datasets ({total_local} total local classes)"
+    )
+    return global_texts
+
+
+def attach_shared_neg_queue(datasets: list, size: int = 80) -> _NegQueue | None:
+    """Attach one shared ``_NegQueue`` to all multimodal datasets (WeDetect-style).
+
+    Across a concat of heterogeneous datasets, recently seen class names become
+    dynamic negatives even when a subset's local ``class_texts`` is tiny.
+    """
+    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
+    if not multimodal:
+        return None
+    queue = _NegQueue(size=size)
+    for ds in multimodal:
+        ds._neg_queue = queue
+        ds.use_neg_queue = True
+    LOGGER.info(f"Shared NegQueue(size={size}) attached to {len(multimodal)} multimodal datasets")
+    return queue
 
 
 class GroundingDataset(YOLODataset):

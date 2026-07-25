@@ -195,6 +195,7 @@ QUANTIZE_VALID_VALUES = "8, 16, 32, 'int8', 'fp16', 'fp32', 'w8a8', 'w16a16', 'w
 CFG_FLOAT_KEYS = frozenset(
     {  # integer or float arguments, i.e. x=2 and x=2.0
         "warmup_epochs",
+        "warmup_start_factor",
         "box",
         "cls",
         "dfl",
@@ -232,6 +233,8 @@ CFG_FRACTION_KEYS = frozenset(
         "iou",
         "fraction",
         "multi_scale",
+        "pseudo_label_conf",
+        "pseudo_label_mem_fraction",
     }
 )
 CFG_INT_KEYS = frozenset(
@@ -247,6 +250,8 @@ CFG_INT_KEYS = frozenset(
         "line_width",
         "nbs",
         "save_period",
+        "warmup_iters",
+        "pseudo_label_batch",
     }
 )
 CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds
@@ -290,9 +295,25 @@ CFG_BOOL_KEYS = frozenset(
         "profile",
         "end2end",
         "cls_remap",
+        "mix_global_texts",
+        "use_neg_queue",
+        "freeze_text_encoder",
+        "close_set",
+        "mask_refine",
+        "pseudo_label",
     }
 )
-CFG_STR_KEYS = frozenset({"optimizer", "split", "copy_paste_mode", "auto_augment"})
+CFG_STR_KEYS = frozenset(
+    {
+        "optimizer",
+        "split",
+        "copy_paste_mode",
+        "auto_augment",
+        "pseudo_label_model",
+        "pseudo_label_classes",
+        "pseudo_label_class_texts",
+    }
+)
 
 
 def cfg2dict(cfg: str | Path | dict | SimpleNamespace) -> dict:

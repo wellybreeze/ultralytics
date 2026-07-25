@@ -406,6 +406,13 @@ class v8DetectionLoss:
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
         )
+        # Open-vocabulary heads (WeDetect/World): score width follows current text slots,
+        # which can exceed annotated data.nc. Keep TAL assigner in sync to avoid
+        # CUDA scatter "index out of bounds" when cls was remapped by RandomLoadText.
+        ncls = int(pred_scores.shape[-1])
+        if self.nc != ncls:
+            self.nc = ncls
+            self.assigner.num_classes = ncls
         anchor_points, stride_tensor = make_anchors(preds["feats"], self.stride, 0.5)
 
         dtype = pred_scores.dtype
@@ -416,7 +423,12 @@ class v8DetectionLoss:
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt(0.0)  # bool mask
+        # Defensive for OV: gather uses all gt_labels before mask_gt is applied, so clamp first.
+        if gt_labels.numel():
+            valid_cls = (gt_labels >= 0) & (gt_labels < ncls)
+            mask_gt = mask_gt & valid_cls
+            gt_labels = gt_labels.clamp(0, max(ncls - 1, 0))
 
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)

@@ -388,6 +388,18 @@ class BaseTrainer:
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
         self.run_callbacks("on_pretrain_routine_end")
 
+    def _get_warmup_iterations(self, nb: int) -> int:
+        """Return warmup iteration count.
+
+        If ``warmup_iters`` > 0, use a fixed iteration budget (WeDetect-style LinearLR).
+        Otherwise fall back to ``warmup_epochs * nb`` (Ultralytics default), with a
+        minimum of 100 iterations when epochs-based warmup is enabled.
+        """
+        wi = int(getattr(self.args, "warmup_iters", 0) or 0)
+        if wi > 0:
+            return wi
+        return max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
+
     def _do_train(self):
         """Perform the full training loop including setup, epoch iteration, validation, and final evaluation."""
         if self.world_size > 1:
@@ -395,7 +407,7 @@ class BaseTrainer:
         self._setup_train()
 
         nb = len(self.train_loader)  # number of batches
-        nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
+        nw = self._get_warmup_iterations(nb)  # warmup iterations
         last_opt_step = -1
         self.epoch_time = None
         self.epoch_time_start = time.time()
@@ -440,14 +452,20 @@ class BaseTrainer:
                 if ni <= nw:
                     xi = [0, nw]  # x interp
                     self.accumulate = max(1, int(np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round()))
+                    wsf = float(getattr(self.args, "warmup_start_factor", 0.0) or 0.0)
                     for x in self.optimizer.param_groups:
-                        # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        # Default: bias lr falls from warmup_bias_lr to lr0, others rise from 0.0.
+                        # When warmup_start_factor > 0 (e.g. WeDetect 0.001), all groups start at factor×initial_lr.
+                        if wsf > 0:
+                            start_lr = x["initial_lr"] * wsf
+                        else:
+                            start_lr = self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0
                         x["lr"] = float(
                             np.interp(
                                 ni,
                                 xi,
                                 [
-                                    self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0,
+                                    start_lr,
                                     x["initial_lr"] * self.lf(epoch),
                                 ],
                             )
@@ -500,7 +518,7 @@ class BaseTrainer:
                     self._build_train_pipeline()  # rebuild dataloaders, optimizer, scheduler
                     self.scheduler.last_epoch = self.start_epoch - 1
                     nb = len(self.train_loader)
-                    nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
+                    nw = self._get_warmup_iterations(nb)
                     last_opt_step = -1
                     self.optimizer.zero_grad()
                     break  # restart epoch loop with reduced batch size

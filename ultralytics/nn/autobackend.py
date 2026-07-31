@@ -32,6 +32,8 @@ from .backends import (
     TensorRTBackend,
     TorchScriptBackend,
     TritonBackend,
+    WeDetectDualBackend,
+    is_wedetect_dual_weight,
 )
 
 
@@ -188,6 +190,30 @@ class AutoBackend(nn.Module):
             verbose (bool): Enable verbose logging.
         """
         super().__init__()
+        # WeDetect dual OV: *_vision.{onnx|engine} + sibling *_language.* (narrow gate; other formats untouched)
+        if not isinstance(model, nn.Module) and is_wedetect_dual_weight(model):
+            if (
+                isinstance(device, torch.device)
+                and torch.cuda.is_available()
+                and device.type != "cpu"
+                and str(model).endswith(".onnx")
+            ):
+                pass  # ONNX Runtime CUDA EP allowed
+            elif (
+                isinstance(device, torch.device)
+                and device.type != "cpu"
+                and str(model).endswith(".engine")
+                and not torch.cuda.is_available()
+            ):
+                device = torch.device("cpu")
+            self.backend = WeDetectDualBackend(model, device=device, fp16=fp16)
+            self.nhwc = False
+            self.format = self.backend.format  # "onnx" or "engine"
+            if not self.backend.names:
+                self.backend.names = default_class_names(data)
+            self.backend.names = check_class_names(self.backend.names)
+            return
+
         # Determine model format from path/URL
         format = "pt" if isinstance(model, nn.Module) else self._model_type(model, dnn)
 

@@ -458,7 +458,15 @@ class WeDetect(Model):
     Export (dynamic open-vocabulary, aligned with WeDetect/deploy)::
 
         model.export(format="onnx", export_mode="dual")   # *_vision.onnx + *_language.onnx
-        model.export(format="onnx", export_mode="whole")  # *_whole.onnx
+        model.export(format="engine", export_mode="dual", device=0)  # raw dual engines (Python NMS)
+        model.export(format="engine", export_mode="dual", nms=True, max_det=300, device=0)  # GPU NMS
+        model.export(format="onnx", export_mode="whole")  # *_whole.onnx (example-script inference only)
+
+    Load dual exports (sibling ``*_language.*`` is resolved automatically)::
+
+        m = WeDetect("best_vision.onnx")  # or best_vision.engine
+        m.set_classes(["车", "人"])
+        m.predict(source="img.jpg")
 
     Attributes:
         model: The loaded WeDetect model instance.
@@ -475,24 +483,59 @@ class WeDetect(Model):
         """Initialize WeDetect model.
 
         Args:
-            model (str | Path): Path to the model file. Supports *.pt (Ultralytics format)
-                and *.yaml config files.
+            model (str | Path): Path to the model file. Supports ``*.pt``, ``*_vision.onnx``,
+                ``*_vision.engine``, and ``*.yaml`` configs.
             verbose (bool): If True, prints additional information during initialization.
         """
+        self._prompt_classes: list[str] | None = None
         super().__init__(model=model, task="detect", verbose=verbose)
-        if not hasattr(self.model, "names"):
+        if isinstance(self.model, torch.nn.Module) and not getattr(self.model, "names", None):
             self.model.names = YAML.load(ROOT / "cfg/datasets/coco8.yaml").get("names")
 
     def set_classes(self, classes: list[str]) -> None:
-        """Set the model's class names for detection.
+        """Set open-vocabulary class prompts for detection.
+
+        Works for PyTorch ``WeDetectModel`` and dual ONNX/TensorRT backends
+        (``*_vision.{onnx|engine}``). Prompt list is cached and re-applied when the
+        predictor/backend is created.
 
         Args:
-            classes (list[str]): A list of categories i.e. ["person"].
+            classes (list[str]): A list of categories i.e. ``["person"]``.
         """
-        self.model.set_classes(classes)
-        self.model.names = {i: n for i, n in enumerate(classes)}
+        names = {i: n for i, n in enumerate(classes)}
+        self._prompt_classes = list(classes)
+        if isinstance(self.model, torch.nn.Module) and hasattr(self.model, "set_classes"):
+            self.model.set_classes(classes)
+            self.model.names = names
         if self.predictor:
-            self.predictor.model.names = self.model.names
+            backend = getattr(self.predictor, "model", None)
+            if backend is not None:
+                if hasattr(backend, "set_classes"):
+                    backend.set_classes(classes)
+                backend.names = names
+
+    def predict(self, source=None, stream: bool = False, predictor=None, **kwargs):
+        """Run prediction; apply cached ``set_classes`` prompts to dual ONNX/engine backends."""
+        from ultralytics.utils import ARGV
+
+        device = kwargs.get("device", self.overrides.get("device"))
+        need_setup = not self.predictor or (
+            device is not None and str(self.predictor.args.device) != str(device)
+        )
+        if need_setup and self._prompt_classes is not None:
+            is_cli = (ARGV[0].endswith("yolo") or ARGV[0].endswith("ultralytics")) and any(
+                x in ARGV for x in ("predict", "track", "mode=predict", "mode=track")
+            )
+            custom = {"conf": 0.25, "batch": 1, "save": is_cli, "mode": "predict", "rect": True, "embed": None}
+            args = {**self.overrides, **custom, **kwargs}
+            args.pop("prompts", None)
+            self.predictor = (predictor or self._smart_load("predictor"))(overrides=args, _callbacks=self.callbacks)
+            self.predictor._prompt_classes = list(self._prompt_classes)
+            self.predictor.setup_model(model=self.model, verbose=is_cli)
+        elif self.predictor and self._prompt_classes and hasattr(self.predictor.model, "set_classes"):
+            self.predictor.model.set_classes(self._prompt_classes)
+            self.predictor.model.names = {i: n for i, n in enumerate(self._prompt_classes)}
+        return super().predict(source=source, stream=stream, predictor=predictor, **kwargs)
 
     @property
     def task_map(self) -> dict[str, dict[str, Any]]:

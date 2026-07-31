@@ -175,7 +175,17 @@ def export_formats():
             ".engine",
             False,
             True,
-            ["batch", "data", "dynamic", "quantize", "simplify", "nms", "fraction"],
+            [
+                "batch",
+                "data",
+                "dynamic",
+                "quantize",
+                "simplify",
+                "nms",
+                "fraction",
+                "workspace",
+                "builder_optimization_level",
+            ],
             "base",
         ],
         ["CoreML", "coreml", ".mlpackage", True, False, ["batch", "dynamic", "quantize", "nms"], "coreml"],
@@ -752,9 +762,14 @@ class Exporter:
             )
             model.clip_model = None  # openvino int8 export error: https://github.com/ultralytics/ultralytics/pull/18445
 
-        # WeDetect dual-tower dynamic open-vocabulary ONNX export (aligned with WeDetect/deploy)
-        if isinstance(model, WeDetectModel) and fmt == "onnx":
+        # WeDetect dual-tower dynamic open-vocabulary ONNX / TensorRT export
+        if isinstance(model, WeDetectModel) and fmt in {"onnx", "engine"}:
             export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
+            if fmt == "engine" and export_mode != "dual":
+                raise ValueError(
+                    "WeDetect TensorRT export only supports export_mode='dual' "
+                    f"(got '{export_mode}'). Use format='onnx' for whole graphs."
+                )
             if export_mode in {"dual", "whole"}:
                 self.file = Path(
                     getattr(model, "pt_path", None) or getattr(model, "yaml_file", None) or model.yaml.get("yaml_file", "")
@@ -764,7 +779,7 @@ class Exporter:
                 self.imgsz = check_imgsz(self.args.imgsz, stride=model.stride, min_dim=2)
                 self.model = model
                 self.run_callbacks("on_export_start")
-                f = self.export_wedetect_onnx()
+                f = self.export_wedetect_engine() if fmt == "engine" else self.export_wedetect_onnx()
                 self.run_callbacks("on_export_end")
                 return str(f)
 
@@ -1116,6 +1131,48 @@ class Exporter:
         return paths[0]
 
     @try_export
+    def export_wedetect_engine(self, prefix=colorstr("WeDetect TensorRT:")):
+        """Export WeDetect dual ONNX towers then convert each to a TensorRT engine."""
+        requirements = ["onnx>=1.12.0,<2.0.0"]
+        if self.args.simplify:
+            ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
+            requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
+        check_requirements(requirements)
+        import onnx  # noqa: F401
+
+        from ultralytics.utils.export.engine import best_onnx_opset
+        from ultralytics.utils.export.wedetect import export_wedetect_engine
+
+        if self.args.quantize == 8:
+            raise ValueError(
+                "WeDetect dual TensorRT INT8 export is not supported; use quantize=16 (FP16) or omit for FP32."
+            )
+        opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type)
+        opset = max(int(opset), 17)
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        max_classes = int(self.args.max_classes)
+        paths = export_wedetect_engine(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            opset=opset,
+            simplify=bool(self.args.simplify),
+            device=self.device,
+            workspace=self.args.workspace,
+            quantize=self.args.quantize,
+            builder_optimization_level=self.args.builder_optimization_level,
+            max_classes=max_classes,
+            nms=bool(self.args.nms),
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf),
+            iou=float(self.args.iou),
+            verbose=bool(self.args.verbose),
+            prefix=prefix,
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
+
+    @try_export
     def export_openvino(self, prefix=colorstr("OpenVINO:")):
         """Export YOLO model to OpenVINO format."""
         from ultralytics.utils.export.openvino import torch2openvino
@@ -1341,6 +1398,7 @@ class Exporter:
             metadata=self.metadata,
             verbose=self.args.verbose,
             prefix=prefix,
+            builder_optimization_level=self.args.builder_optimization_level,
         )
 
         return f

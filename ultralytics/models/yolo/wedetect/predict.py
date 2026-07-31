@@ -8,14 +8,26 @@ from ultralytics.models.yolo.detect import DetectionPredictor
 class WeDetectPredictor(DetectionPredictor):
     """Predictor for WeDetect open-vocabulary detection models.
 
-    Handles text embedding generation for inference with custom class
-    names.  When the model's current class names differ from the
-    requested classes, regenerates text embeddings using XLM-RoBERTa
-    and updates the model's class list.
-
-    For dual-tower ONNX deployment with custom prompts, see
-    ``examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py``.
+    PyTorch weights encode prompts via ``WeDetectModel.set_classes``. Dual ONNX /
+    TensorRT exports (``*_vision`` + ``*_language``) are loaded through
+    ``WeDetectDualBackend``; cached prompts from ``WeDetect.set_classes`` are
+    applied after ``setup_model``.
     """
+
+    def setup_model(self, model, verbose: bool = True):
+        """Load backend, then apply any cached open-vocabulary prompts."""
+        super().setup_model(model, verbose=verbose)
+        prompts = None
+        # Prefer prompts stored on the Ultralytics Model wrapper (WeDetect._prompt_classes)
+        outer = getattr(self, "model", None)
+        # After setup, self.model is AutoBackend; look for prompts via args overrides / predictor attrs
+        if getattr(self, "_prompt_classes", None):
+            prompts = self._prompt_classes
+        elif isinstance(getattr(self.args, "prompt_classes", None), (list, tuple)):
+            prompts = list(self.args.prompt_classes)
+        if prompts and hasattr(self.model, "set_classes"):
+            self.model.set_classes(prompts)
+            self.model.names = {i: n for i, n in enumerate(prompts)}
 
     def pre_transform(self, im):
         """Pre-transform input images before inference."""

@@ -17,17 +17,18 @@ Python: WeDetect(...).train(...)   # freeze_text_encoder=False
         ↓
 得到 runs/.../weights/best.pt（含 text_model_weights）
         ↓
-model.export(format="onnx", export_mode="dual")
+model.export(format="onnx"|"engine", export_mode="dual")
         ↓
-PyTorch set_classes 推理  或  dual ONNX 自定义提示词推理
+PyTorch / dual ONNX|engine：set_classes + predict
 ```
 
-| 阶段 | 关键产物 |
-|------|----------|
-| 微调 | `best.pt` / `last.pt`（视觉 + `text_model_weights`） |
-| 导出 dual（推荐） | `*_vision.onnx` + `*_language.onnx` |
-| 导出 whole | `*_whole.onnx` |
-| 推理 | 任意中文/多语提示词（分词在 Python，不进 ONNX） |
+| 阶段                   | 关键产物                                                         |
+| ---------------------- | ---------------------------------------------------------------- |
+| 微调                   | `best.pt` / `last.pt`（视觉 + `text_model_weights`）        |
+| 导出 dual ONNX（推荐） | `*_vision.onnx` + `*_language.onnx`                            |
+| 导出 dual TensorRT     | `*_vision.engine` + `*_language.engine`                        |
+| 导出 whole             | `*_whole.onnx`（官方 predict/engine 不接，走示例脚本）        |
+| 推理                   | 任意中文/多语提示词（分词在 Python，不进图）                     |
 
 ---
 
@@ -48,20 +49,19 @@ pip install transformers sentencepiece onnx onnxruntime
 
 将官方权重放到仓库根目录 `pretrained_weights/`，例如：
 
-| 文件 | 说明 |
-|------|------|
-| `pretrained_weights/wedetect_tiny.pt` | 轻量，适合冒烟 |
-| `pretrained_weights/wedetect_base.pt` | 常用微调起点（对齐原版 Base） |
-| `pretrained_weights/wedetect_large.pt` | 更大模型 |
+| 文件                                     | 说明                          |
+| ---------------------------------------- | ----------------------------- |
+| `pretrained_weights/wedetect_tiny.pt`  | 轻量，适合冒烟                |
+| `pretrained_weights/wedetect_base.pt`  | 常用微调起点（对齐原版 Base） |
+| `pretrained_weights/wedetect_large.pt` | 更大模型                      |
 
-文本编码器结构为 **XLM-RoBERTa base**（`xlm-roberta:base`）。  
-检测权重里的 `text_model_weights` 会载入 LM；分词器/结构解析顺序（见 `ultralytics/nn/text_model.py`）：
+文本编码器结构为 **XLM-RoBERTa base**（`xlm-roberta:base`）。检测权重里的 `text_model_weights` 会载入 LM；分词器/结构解析顺序（见 `ultralytics/nn/text_model.py`）：
 
 1. **本地目录**（须含 `config.json`）：仓库根下 `xlm-roberta-base/` 或 `checkpoints/xlm-roberta-base/`
 2. HuggingFace 缓存：`~/.cache/huggingface/hub/models--xlm-roberta-base/...`
 3. 均失败则联网下载，并 **先下载成功再** `save_pretrained` 到仓库根 `xlm-roberta-base/`（勿事先建空目录）
 
-> **注意：** 不要在仓库根留下空的 `xlm-roberta-base/`。HuggingFace 会把该相对名当成本地模型路径，导致 tokenizer 报错（信息常误导为缺 `sentencepiece`）。  
+> **注意：** 不要在仓库根留下空的 `xlm-roberta-base/`。HuggingFace 会把该相对名当成本地模型路径，导致 tokenizer 报错（信息常误导为缺 `sentencepiece`）。
 > 原版 `WeDetect/xlm-roberta-base` **不会**被自动发现；离线请复制到上述本地候选路径，并确保含 `config.json` 与分词文件。
 
 ---
@@ -144,10 +144,10 @@ cp ultralytics/cfg/datasets/texts/coco_zh_class_texts.json datasets/my_dataset/t
 
 训练时对**正类**会从该行同义组中**随机抽一个词**作为正样本文本，图上该 `class_id` 的**全部框**都当作匹配该词：
 
-| 写法 | 是否正确 |
-|------|----------|
-| `["车", "车辆", "汽车", "轿车"]`（近义/上位近义） | ✅ 可扩词面泛化 |
-| `["车", "红色车", "白色车"]`（属性写进同义组） | ❌ 抽到「红色车」时白车框也会当正样本，框文不对齐 |
+| 写法                                                | 是否正确                                          |
+| --------------------------------------------------- | ------------------------------------------------- |
+| `["车", "车辆", "汽车", "轿车"]`（近义/上位近义） | ✅ 可扩词面泛化                                   |
+| `["车", "红色车", "白色车"]`（属性写进同义组）    | ❌ 抽到「红色车」时白车框也会当正样本，框文不对齐 |
 
 属性/指代表达（颜色、是否戴帽等）需要：**细分类标注**、**grounding 实例级短语**（§3.6），或自定义实例级加载；不能塞进同一 YOLO 同义行。
 
@@ -207,13 +207,13 @@ train:
 
 JSON 必备字段：
 
-| 位置 | 字段 | 说明 |
-|------|------|------|
-| `images[]` | `id`, `file_name`, `width`, `height`, `caption` | 每图一句 caption |
-| `annotations[]` | `image_id`, `bbox`, `tokens_positive`, `iscrowd` | `bbox` 为 COCO `[x,y,w,h]` 像素；`tokens_positive` 为 caption 上的字符区间 `[start,end)` |
+| 位置              | 字段                                                      | 说明                                                                                             |
+| ----------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `images[]`      | `id`, `file_name`, `width`, `height`, `caption` | 每图一句 caption                                                                                 |
+| `annotations[]` | `image_id`, `bbox`, `tokens_positive`, `iscrowd`  | `bbox` 为 COCO `[x,y,w,h]` 像素；`tokens_positive` 为 caption 上的字符区间 `[start,end)` |
 
-每条 annotation → **一个短语**（多段 `tokens_positive` 会拼成一句）+ **一个框**。  
-同一几何框要挂多组文本：写**多条** annotation（同 `bbox`、不同 `tokens_positive`）。  
+每条 annotation → **一个短语**（多段 `tokens_positive` 会拼成一句）+ **一个框**。
+同一几何框要挂多组文本：写**多条** annotation（同 `bbox`、不同 `tokens_positive`）。
 去重键为 `[cls, x, y, w, h]`（短语不同则 `cls` 不同，可共存）。
 
 这与 YOLO `class_texts` 同义组不同：grounding **没有**「一行多同义词随机抽」；同义泛化需对同一框写多条短语，或仍用 YOLO 子集 + `class_texts`。
@@ -224,33 +224,33 @@ JSON 必备字段：
 
 ### 4.1 训练超参（OV 微调）
 
-| 文件 | 用途 |
-|------|------|
-| `ultralytics/cfg/wedetect_finetune.yaml` | **默认开放词汇微调**（框标注；以该文件为准） |
-| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml` | OV + mask refine（部分超参仍贴近原版 2e-5 / `close_mosaic=4`） |
-| `ultralytics/cfg/default.yaml` | 全局默认；含 `freeze_text_encoder` / `export_mode` / `mix_global_texts` 等 |
+| 文件                                                   | 用途                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `ultralytics/cfg/wedetect_finetune.yaml`             | **默认开放词汇微调**（框标注；以该文件为准）                              |
+| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml` | OV + mask refine（部分超参仍贴近原版 2e-5 /`close_mosaic=4`）                 |
+| `ultralytics/cfg/default.yaml`                       | 全局默认；含`freeze_text_encoder` / `export_mode` / `mix_global_texts` 等 |
 
 `wedetect_finetune.yaml` 当前关键默认值（与代码一致；`train()` / CLI 可覆盖）：
 
-| 键 | 默认值 | 含义 |
-|----|--------|------|
-| `freeze_text_encoder` | `False` | 在线编码并更新文本塔 |
-| `text_lr_mult` | `0.01` | 文本塔学习率 = `lr0 * text_lr_mult` |
-| `close_set` | `False` | 闭集：缓存 embeddings，丢弃在线 LM |
-| `mask_refine` | `False` | 是否 mask 修正框 |
-| `mix_global_texts` | `True`（在 `default.yaml`） | 混数时按同义合并全局词表 |
-| `use_neg_queue` | `False`（在 `default.yaml`） | 跨子集动态负类文本队列 |
-| `optimizer` | `AdamW` | |
-| `lr0` | `5e-6` | 本 cfg 默认；原版 full_tuning 多为 `2e-5` |
-| `weight_decay` | `0.05` | |
-| `epochs` | `12` | |
-| `batch` | `4` | 单卡；多卡时每卡 batch |
-| `dfl` | `0.375` | |
-| `mixup` | `0.15` | |
-| `close_mosaic` | `1` | 最后 N epoch 关 mosaic（本 cfg；mask_refine cfg 为 `4`） |
-| `warmup_iters` | `1000` | 按 **iteration** warmup（覆盖 `warmup_epochs`） |
-| `warmup_start_factor` | `0.001` | 从 `0.001×lr` 升到当前目标 lr |
-| `export_mode` | `dual`（`default.yaml`） | ONNX：`dual` / `whole` |
+| 键                      | 默认值                           | 含义                                                      |
+| ----------------------- | -------------------------------- | --------------------------------------------------------- |
+| `freeze_text_encoder` | `False`                        | 在线编码并更新文本塔                                      |
+| `text_lr_mult`        | `0.01`                         | 文本塔学习率 =`lr0 * text_lr_mult`                      |
+| `close_set`           | `False`                        | 闭集：缓存 embeddings，丢弃在线 LM                        |
+| `mask_refine`         | `False`                        | 是否 mask 修正框                                          |
+| `mix_global_texts`    | `True`（在 `default.yaml`）  | 混数时按同义合并全局词表                                  |
+| `use_neg_queue`       | `False`（在 `default.yaml`） | 跨子集动态负类文本队列                                    |
+| `optimizer`           | `AdamW`                        |                                                           |
+| `lr0`                 | `5e-6`                         | 本 cfg 默认；原版 full_tuning 多为`2e-5`                |
+| `weight_decay`        | `0.05`                         |                                                           |
+| `epochs`              | `12`                           |                                                           |
+| `batch`               | `4`                            | 单卡；多卡时每卡 batch                                    |
+| `dfl`                 | `0.375`                        |                                                           |
+| `mixup`               | `0.15`                         |                                                           |
+| `close_mosaic`        | `1`                            | 最后 N epoch 关 mosaic（本 cfg；mask_refine cfg 为`4`） |
+| `warmup_iters`        | `1000`                         | 按**iteration** warmup（覆盖 `warmup_epochs`）    |
+| `warmup_start_factor` | `0.001`                        | 从`0.001×lr` 升到当前目标 lr                           |
+| `export_mode`         | `dual`（`default.yaml`）     | ONNX：`dual` / `whole`                                |
 
 > **必须**通过 `cfg=wedetect_finetune.yaml`（或 mask_refine 变体）启动训练。若只用 `default.yaml`，默认 `freeze_text_encoder=True`，文本塔不会参与 OV 微调。
 
@@ -370,12 +370,12 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 
 #### 产物文件
 
-| 文件 | 位置 | 说明 |
-|------|------|------|
-| `pseudo_labels.cache` | 数据集 `path` 根目录 | 仅教师伪标；`cls` 已 remap 为 `nc_gt+k`；归一化 xywh；含 `version`/`hash`/`labels` |
-| `labels_pseudo_merged.cache` | 与 YOLO 约定一致：`…/labels_pseudo_merged.cache`（`labels_pseudo_merged/` 目录旁） | GT+伪标合并；格式同 `YOLODataset.cache_labels`（`DATASET_CACHE_VERSION=1.0.3`） |
-| `pseudo_label_meta.json` | 数据集 `path` 根目录 | 幂等元信息：词表 hash、`kept_src_ids`、`conf`、两份 cache 路径/hash、`nc_gt`/`nc` 等 |
-| `<stem>_train.json` | 与 yaml `class_texts` 同目录 | 合并词表（GT + 伪标中文 + leftover 负类）；**不覆盖**原 JSON；训练/微调优先用此文件 |
+| 文件                           | 位置                                                                                    | 说明                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `pseudo_labels.cache`        | 数据集`path` 根目录                                                                   | 仅教师伪标；`cls` 已 remap 为 `nc_gt+k`；归一化 xywh；含 `version`/`hash`/`labels` |
+| `labels_pseudo_merged.cache` | 与 YOLO 约定一致：`…/labels_pseudo_merged.cache`（`labels_pseudo_merged/` 目录旁） | GT+伪标合并；格式同`YOLODataset.cache_labels`（`DATASET_CACHE_VERSION=1.0.3`）           |
+| `pseudo_label_meta.json`     | 数据集`path` 根目录                                                                   | 幂等元信息：词表 hash、`kept_src_ids`、`conf`、两份 cache 路径/hash、`nc_gt`/`nc` 等 |
+| `<stem>_train.json`          | 与 yaml`class_texts` 同目录                                                           | 合并词表（GT + 伪标中文 + leftover 负类）；**不覆盖**原 JSON；训练/微调优先用此文件    |
 
 `get_labels`：伪标合并 cache 用**相对路径可移植 hash**（`merged_cache_hash` / `path_mode=rel_v1`）校验；命中后把 `labels[].im_file` **remap** 到本机当前绝对路径。若合并 cache 失效但 `pseudo_labels.cache` 仍在，则调用 `rebuild_merged_pseudo_cache` 从伪标 cache + GT **重合并**（不跑教师、不扫空 txt）；两者皆无则报错提示重新开启数据集侧 `pseudo_label`。
 
@@ -389,16 +389,16 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 
 因此混数时可只给车辆子集开伪标、LVIS 不开；不必再在 `model.train(pseudo_label=True)` 里全局打开。
 
-| 配置项 | 默认 | 说明 |
-|--------|------|------|
-| `pseudo_label` | `False` | 是否对本数据集 train 启用 |
-| `pseudo_label_model` | `sam3.pt` | 教师：`sam3.pt` / YOLO `.pt` / WeDetect `.pt` |
-| `pseudo_label_classes` | 空 → `coco.yaml` 的 `names` | 教师英文/源词表（与下项同序） |
-| `pseudo_label_class_texts` | 空 → `coco_zh_class_texts.json` | 同序中文伪标词表；**写入合并 `class_texts` 的是中文** |
-| `pseudo_label_conf` | `0.25` | 教师置信度阈值 |
-| `pseudo_label_batch` | `0`（自动） | `≤0`：按空闲显存自动；`>0`：固定。YOLO/WeDetect=图像 batch；SAM3=文本 prompt chunk |
-| `pseudo_label_mem_fraction` | `0.85` | 自动 batch 时占用空闲显存的目标比例，钳制到 `[0.1, 0.95]` |
-| `imgsz` | 训练 `imgsz`（数据集可覆盖） | 教师推理分辨率 |
+| 配置项                        | 默认                              | 说明                                                                                    |
+| ----------------------------- | --------------------------------- | --------------------------------------------------------------------------------------- |
+| `pseudo_label`              | `False`                         | 是否对本数据集 train 启用                                                               |
+| `pseudo_label_model`        | `sam3.pt`                       | 教师：`sam3.pt` / YOLO `.pt` / WeDetect `.pt`                                     |
+| `pseudo_label_classes`      | 空 →`coco.yaml` 的 `names`   | 教师英文/源词表（与下项同序）                                                           |
+| `pseudo_label_class_texts`  | 空 →`coco_zh_class_texts.json` | 同序中文伪标词表；**写入合并 `class_texts` 的是中文**                           |
+| `pseudo_label_conf`         | `0.25`                          | 教师置信度阈值                                                                          |
+| `pseudo_label_batch`        | `0`（自动）                     | `≤0`：按空闲显存自动；`>0`：固定。YOLO/WeDetect=图像 batch；SAM3=文本 prompt chunk |
+| `pseudo_label_mem_fraction` | `0.85`                          | 自动 batch 时占用空闲显存的目标比例，钳制到`[0.1, 0.95]`                              |
+| `imgsz`                     | 训练`imgsz`（数据集可覆盖）     | 教师推理分辨率                                                                          |
 
 示例（写在 [`wedetect_vehicle.yaml`](../../../ultralytics/cfg/datasets/customer/wedetect_vehicle.yaml)）：
 
@@ -518,14 +518,14 @@ results = model.predict(
 )
 ```
 
-等价于仓库里的 `predict.py` 写法。  
+等价于仓库里的 `predict.py` 写法。
 `set_classes` 会加载 XLM-R + `text_model_weights`，编码类名得到 `txt_feats`，再跑视觉检测头。
 
 ---
 
-## 8. 导出 ONNX（动态开放词汇）
+## 8. 导出 ONNX / TensorRT（动态开放词汇）
 
-### 8.1 Dual（推荐）
+### 8.1 Dual ONNX（推荐）
 
 语言塔只算一次，视觉塔复用 `txt_feats`；`num_classes` / `seq_len` 为动态轴，导出后可换任意提示词。
 
@@ -547,20 +547,74 @@ paths = model.export(
 print(paths)
 ```
 
-### 8.2 Whole（单图内联双塔）
+### 8.2 Dual TensorRT（engine）
+
+需 **GPU**。内部先导出 dual ONNX，再按输入名设置 TRT profile，生成同目录 sibling 引擎。支持 FP32 与 FP16（`quantize=16`）；**不支持 INT8**。
+
+**默认（无 NMS，Python 后处理）**：
+
+```python
+model.export(
+    format="engine",
+    export_mode="dual",
+    imgsz=640,
+    device=0,
+    quantize=16,  # 可选；省略则为 FP32
+    builder_optimization_level=5,  # 可选 0-5，同 trtexec --builderOptimizationLevel；越高构建越慢、引擎往往更快
+)
+# 产出：*_vision.engine + *_language.engine（raw bboxes/scores）
+```
+
+**可选 EfficientNMS（GPU 端到端）**：`nms=True` 时仅在 **vision** 塔挂 `EfficientNMS_TRT`；语言塔不变。提示词文本仍可 `set_classes` 任意更换，但单次类别个数 ≤ `max_classes`（默认 80）；单图最多框数由 `max_det`（默认 300）在导出时写入插件。
+
+```python
+model.export(
+    format="engine",
+    export_mode="dual",
+    nms=True,
+    max_classes=80,  # 单次 set_classes 个数上限
+    max_det=300,     # 插件 max_output_boxes
+    conf=0.25,
+    iou=0.45,
+    imgsz=640,
+    device=0,
+)
+```
+
+> `nms=True` 时：TensorRT ≤10 在 vision ONNX 上挂 `EfficientNMS_TRT` 插件；**TensorRT 11+ 已移除该插件**，改为构建时注入原生 `INMSLayer`（推理 API 相同）。带插件的中间 ONNX **不能**用普通 ONNX Runtime 推理。  
+> TensorRT 11 为强类型网络，WeDetect 双塔暂不走 ModelOpt Autocast；TRT11 上请求 FP16 时会回退 FP32。需要 dual FP16 请使用 TensorRT 10.x。
+
+### 8.3 Whole（单图内联双塔）
 
 ```python
 model.export(format="onnx", export_mode="whole", imgsz=640, opset=17)
 # 产出: *_whole.onnx
 ```
 
+`whole` **不接**官方 `WeDetect(...).predict` / `format=engine`；请继续用示例脚本。
+
 > **不要**把 `WeDetectDetect.fuse(txt_feats)` 当作动态 OV 的默认导出路径；那是固定词表加速，与换提示词冲突。当前 dual/whole 路径已禁止 fuse。
 
 ---
 
-## 9. ONNX 自定义提示词测试
+## 9. Dual ONNX / TensorRT 自定义提示词推理
 
-示例脚本：
+### 9.1 官方 API（推荐）
+
+传入 **vision** 路径即可；同目录必须存在 sibling `*_language.{onnx|engine}`（命名：`{stem}_vision.*` ↔ `{stem}_language.*`）。
+
+```python
+from ultralytics import WeDetect
+
+m = WeDetect("runs/wedetect/ov_finetune_base/weights/best_vision.onnx")
+# 或: WeDetect(".../best_vision.engine")  # TensorRT 需 GPU；nms=True 导出的 engine 同样用法
+m.set_classes(["车", "人"])  # EfficientNMS engine：len(list) <= 导出时的 max_classes
+m.predict(source="ultralytics/assets/bus.jpg", device=0, save=True)
+```
+
+换提示词只需再次 `set_classes([...])`，无需重新导出（EfficientNMS 路径也不锁定具体文本，只限制个数上限）。
+
+### 9.2 底层示例脚本（仍可用）
 
 `examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py`
 
@@ -578,62 +632,63 @@ python examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py \
 流程：
 
 1. HF Tokenizer 编码类名 → `input_ids`, `attention_mask`
-2. `language.onnx` → `txt_feats [1,K,D]`
-3. letterbox + `/255` → `vision.onnx(image, txt_feats)` → `bboxes`, `scores`
+2. language 塔 → `txt_feats [1,K,D]`
+3. letterbox + `/255` → vision 塔 `(image, txt_feats)` → `bboxes`, `scores`
 4. 置信度过滤 + NMS + 坐标还原
 
-同一对 ONNX 换 `--classes` 即可验证动态 `K`（例如只写 `人`，或写更多类名）。
+同一对权重换 `--classes` / `set_classes` 即可验证动态 `K`。
 
 ---
 
 ## 10. 端到端检查清单
 
-- [ ] 图像与 `labels/*.txt` 一一对应，`class_id` 与 `names`/`class_texts` 前 `nc` 行对齐  
-- [ ] `class_texts` JSON 长度 **≥ `nc`**（多出行作 OV 负类）；近义可同行，**属性勿与基类同行**  
-- [ ] 已安装 `transformers` + `sentencepiece`；仓库根无空的 `xlm-roberta-base/`  
-- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）  
-- [ ] `cfg=wedetect_finetune.yaml` 且 `freeze_text_encoder=False`，日志中出现文本塔 register / 独立 param group  
-- [ ] `best.pt` 完整（体积与同系列完整权重同量级，约数 GB）且含非空 `text_model_weights`  
-- [ ] `model.val(...)` / 混数多集验证指标合理  
-- [ ] `set_classes` 换提示词后 PyTorch 推理正常  
-- [ ] `export_mode=dual` 得到 vision + language 两个 ONNX  
-- [ ] ONNX 下不同长度 `classes` 时 `scores` 末维随 `K` 变化  
+- [ ] 图像与 `labels/*.txt` 一一对应，`class_id` 与 `names`/`class_texts` 前 `nc` 行对齐
+- [ ] `class_texts` JSON 长度 **≥ `nc`**（多出行作 OV 负类）；近义可同行，**属性勿与基类同行**
+- [ ] 已安装 `transformers` + `sentencepiece`；仓库根无空的 `xlm-roberta-base/`
+- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）
+- [ ] `cfg=wedetect_finetune.yaml` 且 `freeze_text_encoder=False`，日志中出现文本塔 register / 独立 param group
+- [ ] `best.pt` 完整（体积与同系列完整权重同量级，约数 GB）且含非空 `text_model_weights`
+- [ ] `model.val(...)` / 混数多集验证指标合理
+- [ ] `set_classes` 换提示词后 PyTorch 推理正常
+- [ ] `export_mode=dual` 得到 vision + language 两个 ONNX（可选再导出 engine）
+- [ ] `WeDetect("*_vision.onnx|.engine").set_classes(...).predict(...)` 正常出框
+- [ ] ONNX/engine 下不同长度 `classes` 时类别维随 `K` 变化
 
 ---
 
 ## 11. 常见问题
 
-**Q: 文本塔没有更新 / 显存里几乎看不到 LM？**  
+**Q: 文本塔没有更新 / 显存里几乎看不到 LM？**
 确认 `freeze_text_encoder=False` 且 `close_set=False`。闭集会缓存 embeddings 并丢弃在线编码路径。
 
-**Q: 导出后换不了类名？**  
+**Q: 导出后换不了类名？**
 确认用的是 dual/whole，而不是把文本 fuse 进视觉头的固定词表路径。
 
-**Q: `OSError` / tokenizer 报缺 `sentencepiece`？**  
+**Q: `OSError` / tokenizer 报缺 `sentencepiece`？**
 先 `pip install sentencepiece`。若仍失败：检查仓库根是否存在**空的** `xlm-roberta-base/`（删除空目录后重试）；或把完整 HF 模型放到 `xlm-roberta-base/` / `checkpoints/xlm-roberta-base/`（须含 `config.json`）。也可设置 `HF_ENDPOINT` 镜像后联网下载。
 
-**Q: `RuntimeError: failed finding central directory` 加载 `.pt`？**  
+**Q: `RuntimeError: failed finding central directory` 加载 `.pt`？**
 权重文件不完整（拷贝/下载截断）。同系列完整 WeDetect base 微调权重通常约 **4GB** 量级；用 `md5sum` / `rsync -avP` 重新传完整文件。
 
-**Q: 混数 `final_eval` 报 `IndexError`（混淆矩阵越界，如 index 1201）？**  
+**Q: 混数 `final_eval` 报 `IndexError`（混淆矩阵越界，如 index 1201）？**
 曾因切换 val 集时复用上一集 dataloader、却按新 `nc` 建混淆矩阵导致。请使用已修复的 `WeDetectValidator`（独立验证会按 `args.data` 重建 loader）。升级代码后重跑验证即可。
 
-**Q: `set_classes(["红色车"])` 框出所有车或对不齐？**  
+**Q: `set_classes(["红色车"])` 框出所有车或对不齐？**
 YOLO 微调若只把「红色车」写进「车」的同义组，会学成同义。属性应对应细分类框或 grounding 实例短语（§3.3 / §3.6）。
 
-**Q: mask refine 无效？**  
+**Q: mask refine 无效？**
 检查标签是否为带多边形的 segment 格式，且配置为 `mask_refine=True`。
 
-**Q: 伪标签很慢 / 显存打不满？**  
+**Q: 伪标签很慢 / 显存打不满？**
 确认 `pseudo_label_batch=0`（自动）。YOLO/WeDetect 会按空闲显存抬图像 batch；SAM3 只能逐图，但会加大 prompt chunk。也可手动设 `pseudo_label_batch` 与 `pseudo_label_mem_fraction`。
 
-**Q: 伪标签后找不到每图 txt？**  
+**Q: 伪标签后找不到每图 txt？**
 正常。当前实现只写 `pseudo_labels.cache` 与 `labels_pseudo_merged.cache`，不再落盘 `labels_pseudo_merged/*.txt`。
 
-**Q: 伪标 cache 换机器后是否要重跑教师？**  
+**Q: 伪标 cache 换机器后是否要重跑教师？**
 不必，只要相对 `path` 的目录布局与文件 size 不变。当前 hash 为可移植相对路径（`path_mode=rel_v1`）；加载时会把 `im_file` remap 到本机路径。旧绝对路径 hash 的 cache 会 miss 一次并自动重建。
 
-**Q: 微调权重加载后提示词效果像随机初始化？**  
+**Q: 微调权重加载后提示词效果像随机初始化？**
 检查 `.pt` 是否含 `text_model_weights`；`load` / `load_checkpoint` 应回填 `_text_sd`。旧 checkpoint 若缺该字段，需重新用当前代码训练保存。
 
 ---
@@ -689,18 +744,18 @@ model.train(
 
 ## 13. 与原版 WeDetect 对照 / 对齐说明
 
-| 原版 (mmdet) | Ultralytics |
-|--------------|-------------|
-| `wedetect_base_coco_full_tuning_*.py` | `wedetect_finetune.yaml` + `WeDetect.train` |
-| `WeConcat` + 文本对齐混数 | `wedetect_mixed.yaml` + `mix_global_texts` / `use_neg_queue` |
-| `mask_refine` 配置 | `wedetect_finetune_mask_refine.yaml` |
-| 中文 `coco_zh_class_texts.json` | data YAML 的 `class_texts`（模板：`ultralytics/cfg/datasets/texts/`） |
-| LM 在 `backbone.text_model.*` | 顶层 `text_model_weights` + `_text_sd`（格式不同，不做互通） |
-| `LinearLR` 1000 iter、`start_factor=0.001` | `warmup_iters=1000` + `warmup_start_factor=0.001` |
-| `RandomLoadText` shuffle + `padding_value=''` | 已恢复 shuffle；multimodal padding 为空串 |
-| grounding JSON（caption + tokens_positive） | `train.grounding_data` + `GroundingDataset`（整份 JSON） |
-| `deploy/export_onnx.py` dual/whole | `model.export(..., export_mode="dual\|whole")` |
-| `eval_onnx.py` | `examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py` |
+| 原版 (mmdet)                                      | Ultralytics                                                              |
+| ------------------------------------------------- | ------------------------------------------------------------------------ |
+| `wedetect_base_coco_full_tuning_*.py`           | `wedetect_finetune.yaml` + `WeDetect.train`                          |
+| `WeConcat` + 文本对齐混数                       | `wedetect_mixed.yaml` + `mix_global_texts` / `use_neg_queue`       |
+| `mask_refine` 配置                              | `wedetect_finetune_mask_refine.yaml`                                   |
+| 中文`coco_zh_class_texts.json`                  | data YAML 的`class_texts`（模板：`ultralytics/cfg/datasets/texts/`） |
+| LM 在`backbone.text_model.*`                    | 顶层`text_model_weights` + `_text_sd`（格式不同，不做互通）          |
+| `LinearLR` 1000 iter、`start_factor=0.001`    | `warmup_iters=1000` + `warmup_start_factor=0.001`                    |
+| `RandomLoadText` shuffle + `padding_value=''` | 已恢复 shuffle；multimodal padding 为空串                                |
+| grounding JSON（caption + tokens_positive）       | `train.grounding_data` + `GroundingDataset`（整份 JSON）             |
+| `deploy/export_onnx.py` dual/whole              | `model.export(..., export_mode="dual\|whole")`；dual 另支持 `format=engine` |
+| `eval_onnx.py`                                  | `WeDetect("*_vision.onnx\|.engine").set_classes(...).predict(...)`；示例脚本仍可用 |
 
 ### 已对齐（核心 OV 流程）
 
@@ -710,13 +765,13 @@ model.train(
 
 ### P1 已知差异（文档化）
 
-| 项 | 原版 | Ultralytics 现状 |
-|----|------|------------------|
-| close_mosaic stage2 | 切 KeepRatio + LetterBox + affine | 仅关闭 mosaic/mixup，无单独 letterbox 路径 |
-| HSV hue | 乘法 LUT：`(x * gain) % 180` | 加法扰动；yaml 数值同参 |
-| `max_aspect_ratio=100` | RandomPerspective 过滤极端长宽比框 | 无该过滤 |
-| 默认 `lr0` / `close_mosaic` | 常为 `2e-5` / 最后 4 epoch | 主 cfg：`5e-6` / `1`（见上） |
-| 「负文本」 | 缺席类对比 + 可选指代 | 缺席类 / NegQueue；**语言否定句**（非红/未戴帽）无专用监督，需细分类或 grounding |
+| 项                             | 原版                               | Ultralytics 现状                                                                       |
+| ------------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------- |
+| close_mosaic stage2            | 切 KeepRatio + LetterBox + affine  | 仅关闭 mosaic/mixup，无单独 letterbox 路径                                             |
+| HSV hue                        | 乘法 LUT：`(x * gain) % 180`     | 加法扰动；yaml 数值同参                                                                |
+| `max_aspect_ratio=100`       | RandomPerspective 过滤极端长宽比框 | 无该过滤                                                                               |
+| 默认`lr0` / `close_mosaic` | 常为`2e-5` / 最后 4 epoch        | 主 cfg：`5e-6` / `1`（见上）                                                       |
+| 「负文本」                     | 缺席类对比 + 可选指代              | 缺席类 / NegQueue；**语言否定句**（非红/未戴帽）无专用监督，需细分类或 grounding |
 
 ---
 
@@ -729,11 +784,10 @@ python train_wedetect_ov.py
 # 验证
 yolo val model=runs/wedetect/ov_finetune_base/weights/best.pt data=my_dataset.yaml
 
-# 导出
+# 导出 dual ONNX / TensorRT
 python -c "from ultralytics import WeDetect; WeDetect('runs/wedetect/ov_finetune_base/weights/best.pt').export(format='onnx', export_mode='dual', imgsz=640)"
+python -c "from ultralytics import WeDetect; WeDetect('runs/wedetect/ov_finetune_base/weights/best.pt').export(format='engine', export_mode='dual', imgsz=640, device=0)"
 
-# ONNX 推理
-python examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py \
-  --vision .../best_vision.onnx --language .../best_language.onnx \
-  --source ultralytics/assets/bus.jpg --classes 人,公交车,领带
+# dual 推理（自动找 sibling *_language.*）
+python -c "from ultralytics import WeDetect; m=WeDetect('.../best_vision.onnx'); m.set_classes(['人','公交车']); m.predict('ultralytics/assets/bus.jpg', save=True)"
 ```

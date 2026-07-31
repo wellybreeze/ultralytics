@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""WeDetect dual-tower ONNX export helpers (aligned with WeDetect/deploy/export_onnx.py).
+"""WeDetect dual-tower ONNX / TensorRT export helpers (aligned with WeDetect/deploy/export_onnx.py).
 
 Layouts
 -------
@@ -9,10 +9,15 @@ Layouts
 
 Tokenization stays in Python (HuggingFace tokenizer). ``num_classes`` / ``seq_len``
 are dynamic axes so exported models support custom open-vocabulary prompts.
+
+TensorRT (dual only) builds ``*_vision.engine`` + ``*_language.engine`` with per-input
+optimization profiles (image / txt_feats / tokens) — do not use generic ``onnx2engine``
+dynamic profiles, which assume every input is an image tensor.
 """
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -20,7 +25,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ultralytics.utils import LOGGER, colorstr
+from ultralytics.utils import LOGGER, colorstr, is_dgx, is_jetson
+from ultralytics.utils.checks import check_requirements, check_tensorrt, check_version
+from ultralytics.utils.export.engine import apply_builder_optimization_level
 from ultralytics.utils.tal import make_anchors
 
 
@@ -271,7 +278,7 @@ def export_wedetect_onnx(
         "imgsz": f"{h},{w}",
         "embed_dim": str(embed),
         "text_model": getattr(model, "text_model_variant", "xlm-roberta:base"),
-        "stride": ",".join(str(int(s)) for s in vision.stride.tolist()),
+        "stride": str(int(max(int(s) for s in vision.stride.tolist()))),
     }
     for path in exported:
         model_onnx = onnx.load(path)
@@ -291,3 +298,454 @@ def export_wedetect_onnx(
         onnx.save(model_onnx, path)
 
     return exported
+
+
+def append_wedetect_efficient_nms(
+    onnx_file: str | Path,
+    output_file: str | Path | None = None,
+    *,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    max_classes: int = 80,
+    prefix: str = "",
+) -> str:
+    """Append TensorRT ``EfficientNMS_TRT`` to a WeDetect dual vision ONNX graph.
+
+    Vision export already yields ``bboxes`` (xyxy) and ``scores``; this only adds the
+    NMS plugin (no YOLO Concat rewrite). The resulting ONNX is for TensorRT build only
+    and is not runnable in standard ONNX Runtime.
+
+    Args:
+        onnx_file: Path to ``*_vision.onnx``.
+        output_file: Destination ONNX path (default: ``*_vision_effnms.onnx``).
+        max_det: ``max_output_boxes`` for the plugin.
+        conf / iou: Plugin score / IoU thresholds.
+        max_classes: Stored in metadata as the fixed class-count ceiling.
+        prefix: Log prefix.
+
+    Returns:
+        (str): Path to the written ONNX file.
+    """
+    from collections import OrderedDict
+
+    check_requirements("onnx_graphsurgeon>=0.3.26")
+    import numpy as np
+    import onnx
+    import onnx_graphsurgeon as gs
+
+    prefix = prefix or colorstr("WeDetect EfficientNMS:")
+    onnx_file = Path(onnx_file)
+    if output_file is None:
+        output_file = onnx_file.with_name(f"{onnx_file.stem}_effnms.onnx")
+    output_file = Path(output_file)
+
+    LOGGER.info(f"{prefix} appending EfficientNMS_TRT to {onnx_file} -> {output_file}")
+    graph = gs.import_onnx(onnx.load(str(onnx_file)))
+    outs = list(graph.outputs)
+    if len(outs) < 2:
+        raise ValueError(f"WeDetect vision ONNX must have bboxes+scores outputs, got {len(outs)}")
+
+    # Prefer named outputs; fall back to order from export_wedetect_onnx
+    by_name = {o.name: o for o in outs}
+    boxes = by_name.get("bboxes", outs[0])
+    scores = by_name.get("scores", outs[1])
+
+    op_outputs = [
+        gs.Variable(name="num_dets", dtype=np.int32, shape=[1, 1]),
+        gs.Variable(name="det_boxes", dtype=np.float32, shape=[1, max_det, 4]),
+        gs.Variable(name="det_scores", dtype=np.float32, shape=[1, max_det]),
+        gs.Variable(name="det_classes", dtype=np.int32, shape=[1, max_det]),
+    ]
+    # box_coding=False: WeDetect vision emits corner xyxy (trtyolo YOLO path uses center=True)
+    attrs = OrderedDict(
+        plugin_version="1",
+        background_class=-1,
+        max_output_boxes=int(max_det),
+        score_threshold=float(conf),
+        iou_threshold=float(iou),
+        score_activation=False,
+        class_agnostic=False,
+        box_coding=False,
+    )
+    graph.layer(
+        op="EfficientNMS_TRT",
+        name="EfficientNMS_TRT",
+        inputs=[boxes, scores],
+        outputs=op_outputs,
+        attrs=attrs,
+    )
+    graph.outputs = op_outputs
+    graph.cleanup().toposort()
+
+    model_onnx = gs.export_onnx(graph)
+    # Preserve / extend metadata from the source vision ONNX
+    src = onnx.load(str(onnx_file))
+    meta = {p.key: p.value for p in src.metadata_props}
+    meta.update(
+        {
+            "end2end": "True",
+            "nms": "True",
+            "max_det": str(int(max_det)),
+            "max_classes": str(int(max_classes)),
+            "conf": str(float(conf)),
+            "iou": str(float(iou)),
+        }
+    )
+    del model_onnx.metadata_props[:]
+    for k, v in meta.items():
+        prop = model_onnx.metadata_props.add()
+        prop.key, prop.value = k, str(v)
+    if getattr(model_onnx, "ir_version", 0) > 10:
+        model_onnx.ir_version = 10
+    onnx.save(model_onnx, str(output_file))
+    LOGGER.info(f"{prefix} saved {output_file}")
+    return str(output_file)
+
+
+def _inject_native_nms(
+    network,
+    trt,
+    *,
+    max_det: int,
+    conf: float,
+    iou: float,
+    prefix: str = "",
+) -> None:
+    """Replace vision graph outputs with boxes/scores + TensorRT ``INMSLayer`` indices.
+
+    TensorRT 11 removed ``EfficientNMS_TRT``; native ``add_nms`` is the replacement.
+    Outputs: ``bboxes``, ``scores``, ``nms_indices`` ``[M,3]``, ``num_detections``.
+    """
+    import numpy as np
+
+    outs = {network.get_output(i).name: network.get_output(i) for i in range(network.num_outputs)}
+    if "bboxes" not in outs or "scores" not in outs:
+        raise RuntimeError(f"{prefix} native NMS requires named outputs 'bboxes' and 'scores', got {list(outs)}")
+    boxes, scores = outs["bboxes"], outs["scores"]
+    for i in range(network.num_outputs - 1, -1, -1):
+        network.unmark_output(network.get_output(i))
+
+    max_boxes = network.add_constant((), np.array(int(max_det), dtype=np.int32)).get_output(0)
+    iou_t = network.add_constant((), np.array(float(iou), dtype=np.float32)).get_output(0)
+    conf_t = network.add_constant((), np.array(float(conf), dtype=np.float32)).get_output(0)
+    nms = network.add_nms(boxes, scores, max_boxes)
+    if nms is None:
+        raise RuntimeError(f"{prefix} TensorRT add_nms failed")
+    nms.name = "WeDetectNMS"
+    nms.bounding_box_format = trt.BoundingBoxFormat.CORNER_PAIRS
+    nms.topk_box_limit = max(int(max_det), 2000)
+    nms.set_input(3, iou_t)
+    nms.set_input(4, conf_t)
+    indices = nms.get_output(0)
+    indices.name = "nms_indices"
+    num_dets = nms.get_output(1)
+    num_dets.name = "num_detections"
+    boxes.name = "bboxes"
+    scores.name = "scores"
+    network.mark_output(boxes)
+    network.mark_output(scores)
+    network.mark_output(indices)
+    network.mark_output(num_dets)
+    LOGGER.info(f"{prefix} injected native INMSLayer (max_det={max_det}, conf={conf}, iou={iou})")
+
+
+def wedetect_onnx2engine(
+    onnx_file: str | Path,
+    output_file: str | Path | None = None,
+    *,
+    tower: str,
+    imgsz: tuple[int, int] = (640, 640),
+    embed_dim: int = 768,
+    max_classes: int = 80,
+    opt_classes: int = 8,
+    max_seq_len: int = 77,
+    opt_seq_len: int = 16,
+    fixed_classes: bool = False,
+    native_nms: bool = False,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    workspace: int | None = None,
+    quantize: int | str | None = None,
+    builder_optimization_level: int | None = None,
+    metadata: dict | None = None,
+    verbose: bool = False,
+    prefix: str = "",
+) -> str:
+    """Convert one WeDetect dual ONNX tower to TensorRT with correct dynamic profiles.
+
+    Args:
+        onnx_file: Path to ``*_vision.onnx`` or ``*_language.onnx``.
+        output_file: Destination ``.engine`` path.
+        tower: ``vision`` or ``language``.
+        imgsz: Vision image size ``(h, w)``.
+        embed_dim: Text embedding dimension.
+        max_classes / opt_classes: Dynamic ``num_classes`` profile bounds.
+        max_seq_len / opt_seq_len: Dynamic token length profile bounds (language; min length is 1).
+        fixed_classes: If True (NMS vision), lock ``txt_feats`` to ``max_classes``.
+        native_nms: If True, inject TensorRT ``INMSLayer`` after parsing (TRT 11+ path).
+        max_det / conf / iou: Native NMS parameters when ``native_nms=True``.
+        workspace: TensorRT workspace size in GiB.
+        quantize: ``16`` for FP16, ``None``/``32`` for FP32. INT8 is not supported.
+        builder_optimization_level: TensorRT builder optimization level ``[0, 5]``; ``None`` = default.
+        metadata: Optional metadata dict embedded in the engine file.
+        verbose: Verbose TensorRT builder logs.
+        prefix: Log prefix.
+
+    Returns:
+        (str): Path to the written engine file.
+    """
+    if quantize == 8:
+        raise ValueError("WeDetect dual TensorRT INT8 export is not supported; use quantize=16 (FP16) or omit for FP32.")
+
+    if is_jetson(jetpack=7) or is_dgx():
+        check_tensorrt("10.15")
+    try:
+        import tensorrt as trt
+    except ImportError:
+        check_tensorrt()
+        import tensorrt as trt
+    check_version(trt.__version__, ">=7.0.0", hard=True)
+    check_version(trt.__version__, "!=10.2.0", msg="https://github.com/ultralytics/ultralytics/pull/24367")
+
+    prefix = prefix or colorstr("WeDetect TensorRT:")
+    onnx_file = Path(onnx_file)
+    output_file = Path(output_file or onnx_file.with_suffix(".engine"))
+    tower = tower.lower()
+    assert tower in {"vision", "language"}, f"tower must be 'vision' or 'language', got '{tower}'"
+    if native_nms and tower != "vision":
+        raise ValueError("native_nms is only supported for the vision tower")
+
+    LOGGER.info(f"\n{prefix} building {tower} engine from {onnx_file} -> {output_file}")
+    logger = trt.Logger(trt.Logger.INFO)
+    if verbose:
+        logger.min_severity = trt.Logger.Severity.VERBOSE
+
+    builder = trt.Builder(logger)
+    config = builder.create_builder_config()
+    workspace_bytes = int((workspace or 0) * (1 << 30))
+    trt_major = int(trt.__version__.split(".", 1)[0])
+    is_trt10 = trt_major >= 10
+    is_trt11 = trt_major >= 11
+    if workspace_bytes > 0:
+        if hasattr(config, "set_memory_pool_limit"):
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+        else:
+            config.max_workspace_size = workspace_bytes
+    apply_builder_optimization_level(config, builder_optimization_level, prefix=prefix)
+
+    flag = 0 if is_trt10 else (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    network = builder.create_network(flag)
+    use_fp16 = getattr(builder, "platform_has_fast_fp16", True) and quantize == 16
+    if is_trt11 and use_fp16:
+        # Dual towers have non-image inputs; ModelOpt Autocast assumes a single image-shaped input.
+        # Build FP32 on TRT11; use TensorRT 10.x with BuilderFlag.FP16 for dual FP16 engines.
+        LOGGER.warning(
+            f"{prefix} TensorRT {trt.__version__} is strongly-typed; WeDetect dual FP16 via ModelOpt "
+            f"is not supported. Building FP32 engine instead (use TensorRT 10.x for FP16)."
+        )
+        use_fp16 = False
+
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(str(onnx_file)):
+        raise RuntimeError(f"failed to load ONNX file: {onnx_file}")
+
+    if native_nms:
+        _inject_native_nms(network, trt, max_det=max_det, conf=conf, iou=iou, prefix=prefix)
+
+    inputs = [network.get_input(i) for i in range(network.num_inputs)]
+    outputs = [network.get_output(i) for i in range(network.num_outputs)]
+    for inp in inputs:
+        LOGGER.info(f'{prefix} input "{inp.name}" with shape{inp.shape} {inp.dtype}')
+    for out in outputs:
+        LOGGER.info(f'{prefix} output "{out.name}" with shape{out.shape} {out.dtype}')
+
+    h, w = imgsz
+    k_min, k_opt, k_max = 1, max(1, int(opt_classes)), max(int(opt_classes), int(max_classes))
+    if fixed_classes:
+        k_min = k_opt = k_max = max(1, int(max_classes))
+    # Token length min must be 1: short class names (e.g. "人") tokenize to <8 tokens.
+    s_min, s_opt, s_max = 1, max(1, int(opt_seq_len)), max(int(opt_seq_len), int(max_seq_len))
+    profile = builder.create_optimization_profile()
+    for inp in inputs:
+        name = inp.name
+        if tower == "vision":
+            if name == "image":
+                shape = (1, 3, h, w)
+                profile.set_shape(name, min=shape, opt=shape, max=shape)
+            elif name == "txt_feats":
+                profile.set_shape(
+                    name,
+                    min=(1, k_min, embed_dim),
+                    opt=(1, k_opt, embed_dim),
+                    max=(1, k_max, embed_dim),
+                )
+            else:
+                raise ValueError(f"Unexpected vision ONNX input '{name}'")
+        else:  # language
+            if name in {"input_ids", "attention_mask"}:
+                profile.set_shape(name, min=(k_min, s_min), opt=(k_opt, s_opt), max=(k_max, s_max))
+            else:
+                raise ValueError(f"Unexpected language ONNX input '{name}'")
+    config.add_optimization_profile(profile)
+
+    if use_fp16 and not is_trt11:
+        config.set_flag(trt.BuilderFlag.FP16)
+        LOGGER.info(f"{prefix} FP16 enabled")
+
+    if hasattr(builder, "build_serialized_network"):
+        engine = builder.build_serialized_network(network, config)
+    else:
+        built = builder.build_engine(network, config)
+        engine = None if built is None else built.serialize()
+    if engine is None:
+        raise RuntimeError(f"TensorRT engine build failed for {onnx_file}")
+
+    meta = dict(metadata or {})
+    meta.setdefault("export_mode", "dual")
+    meta.setdefault("imgsz", f"{h},{w}")
+    meta.setdefault("embed_dim", str(embed_dim))
+    meta.setdefault("task", "detect")
+    meta.setdefault("tower", tower)
+    meta.setdefault("max_classes", str(int(max_classes)))
+    with open(output_file, "wb") as t:
+        meta_json = json.dumps(meta)
+        t.write(len(meta_json).to_bytes(4, byteorder="little", signed=True))
+        t.write(meta_json.encode())
+        t.write(engine)
+    LOGGER.info(f"{prefix} saved {output_file}")
+    return str(output_file)
+
+
+def export_wedetect_engine(
+    model,
+    file: Path | str,
+    imgsz: int | tuple[int, int] = 640,
+    *,
+    opset: int = 17,
+    simplify: bool = False,
+    device: str | torch.device = "cuda:0",
+    workspace: int | None = None,
+    quantize: int | str | None = None,
+    builder_optimization_level: int | None = None,
+    max_classes: int = 80,
+    nms: bool = False,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    verbose: bool = False,
+    prefix: str = "",
+) -> list[str]:
+    """Export WeDetect dual ONNX then convert both towers to TensorRT engines.
+
+    Args:
+        model: ``WeDetectModel`` instance.
+        file: Source model path (stem used for output names).
+        imgsz: Square size or ``(h, w)``.
+        opset / simplify / device: Passed through to ONNX export.
+        workspace: TensorRT workspace GiB.
+        quantize: ``16`` for FP16; INT8 unsupported.
+        builder_optimization_level: TensorRT builder optimization level ``[0, 5]``; ``None`` = default.
+        max_classes: Max class-count for TRT profiles / EfficientNMS padding ceiling.
+        nms: If True, append ``EfficientNMS_TRT`` to the vision tower before build.
+        max_det / conf / iou: EfficientNMS plugin parameters when ``nms=True``.
+        verbose: Verbose builder logs.
+        prefix: Log prefix.
+
+    Returns:
+        (list[str]): ``[vision.engine, language.engine]``.
+    """
+    prefix = prefix or colorstr("WeDetect TensorRT:")
+    export_mode = "dual"
+    onnx_paths = export_wedetect_onnx(
+        model,
+        file,
+        imgsz=imgsz,
+        export_mode=export_mode,
+        opset=opset,
+        simplify=simplify,
+        device=device,
+        prefix=colorstr("WeDetect ONNX:"),
+    )
+    if len(onnx_paths) < 2:
+        raise RuntimeError("WeDetect TensorRT export requires dual ONNX (vision + language)")
+
+    h, w = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz
+    embed = int(getattr(model.model[-1].cv3[0][-1], "out_channels", 768))
+
+    # TRT 11 removed EfficientNMS_TRT; use native INMSLayer. TRT ≤10 keeps the ONNX plugin path.
+    try:
+        import tensorrt as trt
+
+        trt_major = int(trt.__version__.split(".", 1)[0])
+    except Exception:
+        trt_major = 0
+    use_plugin_nms = bool(nms) and trt_major < 11
+    use_native_nms = bool(nms) and trt_major >= 11
+    if nms and trt_major >= 11:
+        LOGGER.info(
+            f"{prefix} TensorRT {trt_major}.x has no EfficientNMS_TRT plugin; "
+            f"building vision engine with native INMSLayer instead."
+        )
+
+    meta = {
+        "task": "detect",
+        "export_mode": "dual",
+        "imgsz": f"{h},{w}",
+        "embed_dim": str(embed),
+        "text_model": getattr(model, "text_model_variant", "xlm-roberta:base"),
+        "max_classes": str(int(max_classes)),
+        "end2end": str(bool(nms)),
+        "nms": str(bool(nms)),
+    }
+    if nms:
+        meta.update(
+            {
+                "max_det": str(int(max_det)),
+                "conf": str(float(conf)),
+                "iou": str(float(iou)),
+                "nms_format": "efficientnms" if use_plugin_nms else "indices",
+            }
+        )
+
+    vision_onnx, language_onnx = Path(onnx_paths[0]), Path(onnx_paths[1])
+    if use_plugin_nms:
+        vision_onnx = Path(
+            append_wedetect_efficient_nms(
+                vision_onnx,
+                max_det=max_det,
+                conf=conf,
+                iou=iou,
+                max_classes=max_classes,
+                prefix=colorstr("WeDetect EfficientNMS:"),
+            )
+        )
+
+    engines = []
+    for onnx_path, tower in ((vision_onnx, "vision"), (language_onnx, "language")):
+        # Always write sibling engines next to the original dual ONNX stem (not *_effnms)
+        stem_base = Path(onnx_paths[0] if tower == "vision" else onnx_paths[1])
+        eng = stem_base.with_suffix(".engine")
+        wedetect_onnx2engine(
+            onnx_path,
+            eng,
+            tower=tower,
+            imgsz=(h, w),
+            embed_dim=embed,
+            max_classes=max_classes,
+            fixed_classes=bool(nms and tower == "vision"),
+            native_nms=bool(use_native_nms and tower == "vision"),
+            max_det=max_det,
+            conf=conf,
+            iou=iou,
+            workspace=workspace,
+            quantize=quantize,
+            builder_optimization_level=builder_optimization_level,
+            metadata=meta if tower == "vision" else {**meta, "end2end": "False", "nms": "False"},
+            verbose=verbose,
+            prefix=prefix,
+        )
+        engines.append(str(eng))
+    LOGGER.info(f"{prefix} exported {len(engines)} engine(s): {', '.join(engines)}")
+    return engines

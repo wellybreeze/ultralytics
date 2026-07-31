@@ -24,6 +24,7 @@ from .rknn import RKNNBackend
 from .tensorflow import TensorFlowBackend
 from .tensorrt import TensorRTBackend
 from .triton import TritonBackend
+from .wedetect_dual import WeDetectDualBackend, is_wedetect_dual_weight, resolve_wedetect_dual_pair
 
 __all__ = [
     "AxeleraBackend",
@@ -46,4 +47,7 @@ __all__ = [
     "TensorRTBackend",
     "TorchScriptBackend",
     "TritonBackend",
+    "WeDetectDualBackend",
+    "is_wedetect_dual_weight",
+    "resolve_wedetect_dual_pair",
 ]

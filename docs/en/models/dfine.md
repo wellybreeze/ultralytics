@@ -15,7 +15,7 @@ keywords: D-FINE, DFINE, DETR, FDR, GO-LSD, Ultralytics, object detection, trans
 
 [D-FINE](https://github.com/Peterande/D-FINE) (paper: [*D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement*](https://arxiv.org/abs/2410.13842)) is a real-time DETR-style [object detector](https://www.ultralytics.com/glossary/object-detection) that reframes bounding-box regression as **Fine-grained Distribution Refinement (FDR)** and adds **Global Optimal Localization Self-Distillation (GO-LSD)**. Ultralytics integrates D-FINE natively—similar to [RT-DETR](rtdetr.md)—with YAML topologies, `DFINEDecoder`, YOLO-format datasets, and the standard [train](../modes/train.md) / [val](../modes/val.md) / [predict](../modes/predict.md) / [export](../modes/export.md) workflow.
 
-Official pretrained checkpoints use an HGNetv2 backbone plus HybridEncoder (`RepNCSPELAN4` / `SCDown`) and the D-FINE transformer decoder. Converted Ultralytics `.pt` weights match official fp32 outputs under the same preprocessing (640×640 square resize + `/255`, no ImageNet normalize).
+Official pretrained checkpoints use an HGNetv2 backbone plus HybridEncoder (`RepNCSPELAN4` / `SCDown`) and the D-FINE transformer decoder. Ultralytics `.pt` weights in this repository match official fp32 outputs under the same preprocessing (640×640 square resize + `/255`, no ImageNet normalize).
 
 ### Key Features
 
@@ -23,21 +23,58 @@ Official pretrained checkpoints use an HGNetv2 backbone plus HybridEncoder (`Rep
 - **GO-LSD:** Self-distillation between decoder layers improves localization without extra inference cost.
 - **NMS-free DETR head:** End-to-end set prediction; Ultralytics postprocess uses confidence filtering (same pattern as RT-DETR).
 - **Native Ultralytics stack:** `DFINE` facade, `DFINEDetectionModel`, YOLO `data=*.yaml` training, and ONNX/TensorRT-friendly export.
-- **Scale coverage:** Nano → XLarge (`dfine-n/s/m/l/x`) with optional Objects365 / Objects365→COCO checkpoints via weight conversion.
+- **Scale coverage:** Nano → XLarge (`dfine-n/s/m/l/x`) with COCO, Objects365, and Objects365→COCO pretrained checkpoints.
 
-## Official COCO Performance
+## Model Zoo
 
-Metrics below are from the [official D-FINE Model Zoo](https://github.com/Peterande/D-FINE) (COCO val2017, TensorRT latency on T4). Ultralytics preserves architecture and weight parity after conversion; runtime FPS depends on your export backend.
+Metrics and latency are from the [official D-FINE Model Zoo](https://github.com/Peterande/D-FINE) (COCO val2017; T4, `batch_size=1`, fp16, TensorRT). Ultralytics `.pt` weights are published on [Release v2.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v2.0.0).
 
-| Model     | AP<sup>val</sup> | Params | Latency (T4) | GFLOPs |
-| --------- | ---------------- | ------ | ------------ | ------ |
-| D-FINE-N  | 42.8             | 4M     | 2.12 ms      | 7      |
-| D-FINE-S  | 48.5             | 10M    | 3.49 ms      | 25     |
-| D-FINE-M  | 52.3             | 19M    | 5.62 ms      | 57     |
-| D-FINE-L  | 54.0             | 31M    | 8.07 ms      | 91     |
-| D-FINE-X  | 55.8             | 62M    | 12.89 ms     | 202    |
+### COCO
 
-Objects365-pretrained and Objects365→COCO finetunes (higher COCO AP) are also supported after conversion; see [Weight conversion](#weight-conversion).
+| Model | Dataset | AP<sup>val</sup> | Params | Latency (ms) | GFLOPs | Config | Weights |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| D-FINE-N | COCO | **42.8** | 4M | 2.12ms | 7 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-n.yaml) | [42.8](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-n.pt) |
+| D-FINE-S | COCO | **48.5** | 10M | 3.49ms | 25 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-s.yaml) | [48.5](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-s.pt) |
+| D-FINE-M | COCO | **52.3** | 19M | 5.62ms | 57 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-m.yaml) | [52.3](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-m.pt) |
+| D-FINE-L | COCO | **54.0** | 31M | 8.07ms | 91 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-l.yaml) | [54.0](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l.pt) |
+| D-FINE-X | COCO | **55.8** | 62M | 12.89ms | 202 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-x.yaml) | [55.8](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-x.pt) |
+
+### Objects365+COCO
+
+| Model | Dataset | AP<sup>val</sup> | Params | Latency (ms) | GFLOPs | Config | Weights |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| D-FINE-S | Objects365+COCO | **50.7** | 10M | 3.49ms | 25 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-s.yaml) | [50.7](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-s-obj2coco.pt) |
+| D-FINE-M | Objects365+COCO | **55.1** | 19M | 5.62ms | 57 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-m.yaml) | [55.1](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-m-obj2coco.pt) |
+| D-FINE-L | Objects365+COCO | **57.3** | 31M | 8.07ms | 91 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-l.yaml) | [57.3](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l-obj2coco-e25.pt) |
+| D-FINE-X | Objects365+COCO | **59.3** | 62M | 12.89ms | 202 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-x.yaml) | [59.3](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-x-obj2coco.pt) |
+
+**We strongly recommend fine-tuning from Objects365-pretrained weights:**
+
+⚠️ Note: These checkpoints help on complex scenes. For very simple class sets they may overfit and underperform.
+
+<details>
+<summary><strong>🔥 Objects365 pretrained models (best generalization)</strong></summary>
+
+| Model | Dataset | AP<sup>val</sup> | AP<sup>5000</sup> | Params | Latency (ms) | GFLOPs | Config | Weights |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| D-FINE-S | Objects365 | **31.0** | **30.5** | 10M | 3.49ms | 25 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-s.yaml) | [30.5](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-s-obj365.pt) |
+| D-FINE-M | Objects365 | **38.6** | **37.4** | 19M | 5.62ms | 57 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-m.yaml) | [37.4](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-m-obj365.pt) |
+| D-FINE-L | Objects365 | - | **40.6** | 31M | 8.07ms | 91 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-l.yaml) | [40.6](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l-obj365.pt) |
+| D-FINE-L (E25) | Objects365 | **44.7** | **42.6** | 31M | 8.07ms | 91 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-l.yaml) | [42.6](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l-obj365-e25.pt) |
+| D-FINE-X | Objects365 | **49.5** | **46.5** | 62M | 12.89ms | 202 | [yaml](../../../ultralytics/cfg/models/dfine/dfine-x.yaml) | [46.5](https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-x-obj365.pt) |
+
+- **E25**: Official retrain extended to 25 epochs.
+- **AP<sup>val</sup>** is evaluated on the full *Objects365* validation set.
+- **AP<sup>5000</sup>** is evaluated on the first 5000 samples of the *Objects365* validation set.
+
+</details>
+
+**Notes:**
+
+- **AP<sup>val</sup>** (COCO / Objects365+COCO tables) is evaluated on *MSCOCO val2017*.
+- **Latency** is measured on a single T4 GPU with $batch\_size = 1$, fp16, and TensorRT (see official D-FINE notes).
+- **Objects365+COCO** means Objects365-pretrained weights fine-tuned on *COCO*.
+- YAML notes: **N/S/M** enable Learnable Affine Blocks (`use_lab=True`); **L/X** set `freeze_norm: true` to match official `FrozenBatchNorm2d`.
 
 ## Usage Examples
 
@@ -48,8 +85,9 @@ Objects365-pretrained and Objects365→COCO finetunes (higher COCO AP) are also 
         ```python
         from ultralytics import DFINE
 
-        # Load a converted Ultralytics checkpoint (or a YAML for random init)
-        model = DFINE("dfine-l.pt")  # or "dfine-l.yaml"
+        # Load Ultralytics pretrained weights from Release v2.0.0 (local path or YAML also OK)
+        model = DFINE("https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l.pt")
+        # model = DFINE("dfine-l.yaml")  # random init
 
         # Display model information (optional)
         model.info()
@@ -70,13 +108,10 @@ Objects365-pretrained and Objects365→COCO finetunes (higher COCO AP) are also 
     === "CLI"
 
         ```bash
-        # Train
+        # Download weights, then train / predict (stem "dfine" selects the DFINE class)
+        wget https://github.com/wellybreeze/ultralytics/releases/download/v2.0.0/dfine-l.pt
         yolo detect train model=dfine-l.pt data=coco8.yaml epochs=100 imgsz=640
-
-        # Predict (stem "dfine" selects the DFINE class)
         yolo predict model=dfine-l.pt source=path/to/bus.jpg
-
-        # Validate / export
         yolo val model=dfine-l.pt data=coco8.yaml
         yolo export model=dfine-l.pt format=onnx
         ```
@@ -84,38 +119,6 @@ Objects365-pretrained and Objects365→COCO finetunes (higher COCO AP) are also 
 !!! tip "Preprocessing"
 
     Match official D-FINE inference: square resize to `imgsz` (default 640) with `LetterBox(scale_fill=True)` and divide by 255. Do **not** apply ImageNet mean/std on the Ultralytics path.
-
-## Weight Conversion
-
-Official releases are `.pth` (keys under `model` / `ema`). Convert them to Ultralytics `.pt` with the bundled script (fp32 by default for numerical parity):
-
-```bash
-# From the ultralytics repository root
-python tools/convert_dfine_weights.py \
-  --weights path/to/dfine_l_coco.pth \
-  --cfg dfine-l.yaml \
-  --out dfine-l.pt
-
-# Objects365 checkpoints (nc=366 inferred from the official head)
-python tools/convert_dfine_weights.py \
-  --weights path/to/dfine_l_obj365.pth \
-  --cfg dfine-l.yaml \
-  --out dfine-l-obj365.pt
-```
-
-| Flag        | Description                                                                 |
-| ----------- | --------------------------------------------------------------------------- |
-| `--weights` | Official `.pth` path                                                        |
-| `--cfg`     | Ultralytics YAML (`dfine-n/s/m/l/x.yaml`)                                   |
-| `--out`     | Output `.pt` path                                                           |
-| `--nc`      | Optional class count override (auto-inferred from `enc_score_head` if omit) |
-| `--fp16`    | Save half precision (not recommended when checking parity)                  |
-| `--dry-run` | Print key-map only                                                          |
-
-YAML notes:
-
-- **N/S/M** enable Learnable Affine Blocks (`use_lab=True`) to match official HGNetv2.
-- **L/X** set `freeze_norm: true` so backbone BatchNorm matches official `FrozenBatchNorm2d`.
 
 ## Supported Tasks and Modes
 
@@ -166,7 +169,7 @@ Both are NMS-free DETR detectors with a similar Ultralytics facade. D-FINE repla
 
 ### Where do I get `.pt` weights?
 
-Convert official `.pth` files with `tools/convert_dfine_weights.py` (see [Weight conversion](#weight-conversion)). Keep fp32 when validating numerical parity against the official model.
+Download from [Release v2.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v2.0.0), or use the links in the [Model Zoo](#model-zoo) tables above. Metrics match the official zoo; weights are Ultralytics-format checkpoints.
 
 ### Can I train on a custom YOLO dataset?
 

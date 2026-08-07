@@ -79,7 +79,10 @@ from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.data.dataset import ClassificationDataset
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.autobackend import check_class_names, default_class_names
-from ultralytics.nn.modules import C2f, Classify, Detect, RTDETRDecoder, Segment26, SemanticSegment
+from ultralytics.nn.modules import C2f, Classify, Detect, DFINEDecoder, RTDETRDecoder, Segment26, SemanticSegment
+
+# DETR-style decoders share export / NMS constraints (end2end, opset, max_det clamp).
+_DETR_DECODERS = (RTDETRDecoder, DFINEDecoder)
 from ultralytics.nn.tasks import ClassificationModel, DetectionModel, SegmentationModel, WorldModel
 from ultralytics.utils import (
     ARM64,
@@ -657,7 +660,7 @@ class Exporter:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not is_tf_format or TORCH_1_13, "TensorFlow exports with NMS require torch>=1.13"
             assert fmt != "onnx" or TORCH_1_13, "ONNX export with NMS requires torch>=1.13"
-            if getattr(model, "end2end", False) or isinstance(model.model[-1], RTDETRDecoder):
+            if getattr(model, "end2end", False) or isinstance(model.model[-1], _DETR_DECODERS):
                 LOGGER.warning("'nms=True' is not available for end2end models. Forcing 'nms=False'.")
                 self.args.nms = False
             self.args.conf = self.args.conf or 0.25  # set conf default value for nms export
@@ -739,14 +742,14 @@ class Exporter:
                     m.bake_argmax = check_version(f"tensorrt-cu{cuda_major}", ">=10.0.0") or check_version(
                         "tensorrt", ">=10.0.0"
                     )
-            if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
+            if isinstance(m, (Detect, *_DETR_DECODERS)):  # includes Detect subclasses + DETR decoders
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
                 # Clamp max_det to available queries/anchors (required for TensorRT compatibility)
                 available = (
                     m.num_queries
-                    if isinstance(m, RTDETRDecoder)
+                    if isinstance(m, _DETR_DECODERS)
                     else sum(int(self.imgsz[0] / s) * int(self.imgsz[1] / s) for s in model.stride.tolist())
                 )
                 m.max_det = min(self.args.max_det, available)
@@ -1252,9 +1255,9 @@ class Exporter:
             )
 
         # Export to ONNX
-        if isinstance(self.model.model[-1], RTDETRDecoder):
+        if isinstance(self.model.model[-1], _DETR_DECODERS):
             self.args.opset = self.args.opset or 19
-            assert 16 <= self.args.opset <= 19, "RTDETR export requires opset>=16;<=19"
+            assert 16 <= self.args.opset <= 19, "RTDETR/DFINE export requires opset>=16;<=19"
         self.args.simplify = True
         f_onnx = self.export_onnx()  # ensure ONNX is available
         keras_model = onnx2saved_model(

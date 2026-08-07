@@ -1066,6 +1066,10 @@ def entrypoint(debug: str = "") -> None:
         from ultralytics import RTDETR
 
         model = RTDETR(model)  # no task argument
+    elif "dfine" in stem:  # guess architecture
+        from ultralytics import DFINE
+
+        model = DFINE(model)  # no task argument
     elif "fastsam" in stem:
         from ultralytics import FastSAM
 

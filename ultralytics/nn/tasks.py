@@ -45,6 +45,9 @@ from ultralytics.nn.modules import (
     Conv2,
     ConvTranspose,
     Detect,
+    DFINEDecoder,
+    DFINERepNCSPELAN4,
+    DFINESCDown,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -1133,6 +1136,92 @@ class RTDETRDetectionModel(DetectionModel):
         return x
 
 
+class DFINEDetectionModel(RTDETRDetectionModel):
+    """D-FINE Detection Model using FDR decoder losses (VFL + L1/GIoU + FGL + DDF).
+
+    Reuses ``RTDETRDetectionModel.predict`` (head receives Ultralytics batch for CDN).
+    Only BN parity hooks and ``DFINEDetectionLoss`` differ from RT-DETR.
+    """
+
+    def __init__(self, cfg="dfine-l.yaml", ch=3, nc=None, verbose=True):
+        """Initialize the DFINEDetectionModel with official BN / freeze_norm parity hooks."""
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        # Official D-FINE uses PyTorch BN defaults; Ultralytics initialize_weights sets
+        # eps=1e-3 / momentum=0.03 which breaks numerical parity with converted weights.
+        self._align_official_batchnorm()
+        # L/X (and Objects365 variants) set HGNetv2.freeze_norm=True → FrozenBatchNorm2d.
+        if self.yaml.get("freeze_norm", False):
+            self._freeze_backbone_norm()
+
+    def _align_official_batchnorm(self):
+        """Reset BatchNorm2d hyperparameters to official D-FINE defaults (eps=1e-5, momentum=0.1)."""
+        for m in self.modules():
+            if isinstance(m, torch.nn.BatchNorm2d):
+                m.eps = 1e-5
+                m.momentum = 0.1
+
+    def _freeze_backbone_norm(self):
+        """Replace backbone BatchNorm2d with official FrozenBatchNorm2d (before HybridEncoder)."""
+        from ultralytics.nn.modules.conv import freeze_batch_norm2d
+
+        names = [type(m).__name__ for m in self.model]
+        if "AIFI" not in names:
+            return
+        # Layers before the first encoder input_proj (immediately preceding AIFI).
+        for i in range(names.index("AIFI") - 1):
+            freeze_batch_norm2d(self.model[i])
+
+    def _apply(self, fn):
+        """Apply ``fn`` to parameters/buffers; tolerate missing decoder anchors."""
+        # Call DetectionModel._apply (skip RTDETR's unconditional anchors access).
+        self = DetectionModel._apply(self, fn)
+        m = self.model[-1]
+        if hasattr(m, "anchors") and isinstance(m.anchors, torch.Tensor):
+            m.anchors = fn(m.anchors)
+        if hasattr(m, "valid_mask") and isinstance(m.valid_mask, torch.Tensor):
+            m.valid_mask = fn(m.valid_mask)
+        return self
+
+    def init_criterion(self):
+        """Initialize the D-FINE FDR loss criterion."""
+        from ultralytics.models.utils.dfine_loss import DFINEDetectionLoss
+
+        head = self.model[-1]
+        nc = getattr(self, "nc", None) or self.yaml.get("nc", head.nc)
+        reg_max = getattr(head, "reg_max", 32)
+        return DFINEDetectionLoss(nc=nc, reg_max=reg_max)
+
+    def loss(self, batch, preds=None):
+        """Compute D-FINE losses from the decoder training dict.
+
+        Returns:
+            (torch.Tensor): Total loss value.
+            (torch.Tensor): Main losses ``[loss_giou, loss_vfl, loss_bbox]``.
+        """
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+
+        img = batch["img"]
+        bs = img.shape[0]
+        batch_idx = batch["batch_idx"]
+        targets = {
+            "cls": batch["cls"].to(img.device, dtype=torch.long).view(-1),
+            "bboxes": batch["bboxes"].to(device=img.device),
+            "batch_idx": batch_idx.to(img.device, dtype=torch.long).view(-1),
+            "gt_groups": [(batch_idx == i).sum().item() for i in range(bs)],
+        }
+
+        if preds is None:
+            preds = self.predict(img, batch=targets)
+        if not isinstance(preds, dict):
+            preds = preds[1] if isinstance(preds, (tuple, list)) and len(preds) > 1 else preds
+
+        loss = self.criterion(preds, targets)
+        return sum(loss.values()), torch.as_tensor(
+            [loss[k].detach() for k in ["loss_giou", "loss_vfl", "loss_bbox"]], device=img.device
+        )
+
+
 class WorldModel(DetectionModel):
     """YOLOv8 World Model.
 
@@ -2026,6 +2115,7 @@ def parse_model(d, ch, verbose=True):
             C2f,
             C3k2,
             RepNCSPELAN4,
+            DFINERepNCSPELAN4,
             ELAN1,
             ADown,
             AConv,
@@ -2040,6 +2130,7 @@ def parse_model(d, ch, verbose=True):
             RepC3,
             PSA,
             SCDown,
+            DFINESCDown,
             C2fCIB,
             A2C2f,
         }
@@ -2141,7 +2232,7 @@ def parse_model(d, ch, verbose=True):
             args.append([ch[x] for x in f])
         elif m is ImagePoolingAttn:
             args.insert(1, [ch[x] for x in f])  # channels as second arg
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m in frozenset({RTDETRDecoder, DFINEDecoder}):  # channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         elif m is CBLinear:
             c2 = args[0]

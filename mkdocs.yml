@@ -260,6 +260,7 @@ nav:
       - YOLO-NAS (Neural Architecture Search): models/yolo-nas.md
       - RT-DETR (Realtime Detection Transformer): models/rtdetr.md
       - RF-DETR (Roboflow Detection Transformer): models/rfdetr.md
+      - D-FINE (Fine-grained Distribution Refinement): models/dfine.md
       - YOLO-World: models/yolo-world.md
       - YOLOE (Real-Time Seeing Anything): models/yoloe.md
   - Compare:
@@ -729,6 +730,11 @@ nav:
               - predict: reference/models/rtdetr/predict.md
               - train: reference/models/rtdetr/train.md
               - val: reference/models/rtdetr/val.md
+          - dfine:
+              - model: reference/models/dfine/model.md
+              - predict: reference/models/dfine/predict.md
+              - train: reference/models/dfine/train.md
+              - val: reference/models/dfine/val.md
           - sam:
               - amg: reference/models/sam/amg.md
               - build: reference/models/sam/build.md
@@ -756,6 +762,7 @@ nav:
                   - vitdet: reference/models/sam/sam3/vitdet.md
                   - vl_combiner: reference/models/sam/sam3/vl_combiner.md
           - utils:
+              - dfine_loss: reference/models/utils/dfine_loss.md
               - loss: reference/models/utils/loss.md
               - ops: reference/models/utils/ops.md
           - yolo:
@@ -818,6 +825,9 @@ nav:
               - activation: reference/nn/modules/activation.md
               - block: reference/nn/modules/block.md
               - conv: reference/nn/modules/conv.md
+              - dfine: reference/nn/modules/dfine.md
+              - dfine_encoder: reference/nn/modules/dfine_encoder.md
+              - dfine_utils: reference/nn/modules/dfine_utils.md
               - head: reference/nn/modules/head.md
               - transformer: reference/nn/modules/transformer.md
               - utils: reference/nn/modules/utils.md

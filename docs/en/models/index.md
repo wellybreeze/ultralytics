@@ -1,7 +1,7 @@
 ---
 comments: true
-description: Discover a variety of models supported by Ultralytics, including YOLOv3 to YOLO26, NAS, SAM, RT-DETR, and RF-DETR for detection, segmentation, semantic segmentation, and more.
-keywords: Ultralytics, supported models, YOLOv3, YOLOv4, YOLOv5, YOLOv6, YOLOv7, YOLOv8, YOLOv9, YOLOv10, YOLO11, SAM, SAM2, SAM3, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, RF-DETR, YOLO-World, object detection, image segmentation, semantic segmentation, classification, pose estimation, multi-object tracking
+description: Discover a variety of models supported by Ultralytics, including YOLOv3 to YOLO26, NAS, SAM, RT-DETR, RF-DETR, and D-FINE for detection, segmentation, semantic segmentation, and more.
+keywords: Ultralytics, supported models, YOLOv3, YOLOv4, YOLOv5, YOLOv6, YOLOv7, YOLOv8, YOLOv9, YOLOv10, YOLO11, SAM, SAM2, SAM3, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, RF-DETR, D-FINE, YOLO-World, object detection, image segmentation, semantic segmentation, classification, pose estimation, multi-object tracking
 ---
 
 # Models Supported by Ultralytics
@@ -32,8 +32,9 @@ Here are some of the key models supported:
 16. **[YOLO-NAS](yolo-nas.md)**: YOLO [Neural Architecture Search](https://www.ultralytics.com/glossary/neural-architecture-search-nas) (NAS) Models.
 17. **[Real-Time Detection Transformers (RT-DETR)](rtdetr.md)**: Baidu's PaddlePaddle real-time Detection [Transformer](https://www.ultralytics.com/glossary/transformer) (RT-DETR) models.
 18. **[RF-DETR](rfdetr.md)**: Roboflow's DINOv2-based real-time Detection Transformer for detection, instance segmentation, and keypoints.
-19. **[YOLO-World](yolo-world.md)**: Real-time Open Vocabulary Object Detection models from Tencent AI Lab.
-20. **[YOLOE](yoloe.md)**: An improved open-vocabulary object detector that maintains YOLO's real-time performance while detecting arbitrary classes beyond its training data.
+19. **[D-FINE](dfine.md)**: Fine-grained Distribution Refinement DETR detector (HGNetv2 + FDR decoder) with native Ultralytics train/val/predict/export.
+20. **[YOLO-World](yolo-world.md)**: Real-time Open Vocabulary Object Detection models from Tencent AI Lab.
+21. **[YOLOE](yoloe.md)**: An improved open-vocabulary object detector that maintains YOLO's real-time performance while detecting arbitrary classes beyond its training data.
 
 <p align="center">
   <br>
@@ -56,7 +57,7 @@ Note the below example spotlights YOLO11 [Detect](../tasks/detect.md) models for
 
     === "Python"
 
-        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()` and `RTDETR()` classes to create a model instance in Python:
+        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()`, `RTDETR()`, `RFDETR()` and `DFINE()` classes to create a model instance in Python:
 
         ```python
         from ultralytics import YOLO

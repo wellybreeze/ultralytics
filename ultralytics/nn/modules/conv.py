@@ -19,11 +19,14 @@ __all__ = (
     "DWConv",
     "DWConvTranspose2d",
     "Focus",
+    "FrozenBatchNorm2d",
     "GhostConv",
     "Index",
+    "LearnableAffineBlock",
     "LightConv",
     "RepConv",
     "SpatialAttention",
+    "freeze_batch_norm2d",
 )
 
 
@@ -36,6 +39,72 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
     return p
 
 
+class LearnableAffineBlock(nn.Module):
+    """Learnable affine transform ``y = scale * x + bias`` (D-FINE HGNetv2 LAB)."""
+
+    def __init__(self, scale_value: float = 1.0, bias_value: float = 0.0):
+        """Initialize learnable scale and bias parameters."""
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor([scale_value]), requires_grad=True)
+        self.bias = nn.Parameter(torch.tensor([bias_value]), requires_grad=True)
+
+    def forward(self, x):
+        """Apply affine transform."""
+        return self.scale * x + self.bias
+
+
+class FrozenBatchNorm2d(nn.Module):
+    """BatchNorm2d with fixed stats/affine (official D-FINE ``freeze_norm`` path).
+
+    Uses the DETR-style fused ``rsqrt`` formulation which differs numerically from
+    ``nn.BatchNorm2d`` eval even with identical buffers — required for L/X parity.
+    """
+
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        """Initialize frozen BN buffers."""
+        super().__init__()
+        self.register_buffer("weight", torch.ones(num_features))
+        self.register_buffer("bias", torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.eps = eps
+        self.num_features = num_features
+
+    @classmethod
+    def from_batchnorm(cls, bn: nn.BatchNorm2d) -> FrozenBatchNorm2d:
+        """Create a FrozenBatchNorm2d copying buffers from an ``nn.BatchNorm2d``."""
+        m = cls(bn.num_features, eps=bn.eps)
+        m.weight.data.copy_(bn.weight.data)
+        m.bias.data.copy_(bn.bias.data)
+        m.running_mean.data.copy_(bn.running_mean.data)
+        m.running_var.data.copy_(bn.running_var.data)
+        return m
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply frozen batch normalization."""
+        w = self.weight.reshape(1, -1, 1, 1)
+        b = self.bias.reshape(1, -1, 1, 1)
+        rv = self.running_var.reshape(1, -1, 1, 1)
+        rm = self.running_mean.reshape(1, -1, 1, 1)
+        scale = w * (rv + self.eps).rsqrt()
+        bias = b - rm * scale
+        return x * scale + bias
+
+    def extra_repr(self) -> str:
+        """Return extra representation string."""
+        return f"{self.num_features}, eps={self.eps}"
+
+
+def freeze_batch_norm2d(module: nn.Module) -> nn.Module:
+    """Recursively replace ``nn.BatchNorm2d`` with ``FrozenBatchNorm2d`` in-place."""
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.BatchNorm2d):
+            setattr(module, name, FrozenBatchNorm2d.from_batchnorm(child))
+        else:
+            freeze_batch_norm2d(child)
+    return module
+
+
 class Conv(nn.Module):
     """Standard convolution module with batch normalization and activation.
 
@@ -43,12 +112,13 @@ class Conv(nn.Module):
         conv (nn.Conv2d): Convolutional layer.
         bn (nn.BatchNorm2d): Batch normalization layer.
         act (nn.Module): Activation function layer.
+        lab (nn.Module): Optional LearnableAffineBlock after activation (D-FINE).
         default_act (nn.Module): Default activation function (SiLU).
     """
 
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True, use_lab=False):
         """Initialize Conv layer with given parameters.
 
         Args:
@@ -60,11 +130,14 @@ class Conv(nn.Module):
             g (int): Groups.
             d (int): Dilation.
             act (bool | nn.Module): Activation function.
+            use_lab (bool): If True and activation is enabled, append LearnableAffineBlock.
         """
         super().__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
         self.bn = nn.BatchNorm2d(c2)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        # Match official ConvBNAct: LAB only when activation is used.
+        self.lab = LearnableAffineBlock() if use_lab and not isinstance(self.act, nn.Identity) else nn.Identity()
 
     def forward(self, x):
         """Apply convolution, batch normalization and activation to input tensor.
@@ -75,7 +148,7 @@ class Conv(nn.Module):
         Returns:
             (torch.Tensor): Output tensor.
         """
-        return self.act(self.bn(self.conv(x)))
+        return self.lab(self.act(self.bn(self.conv(x))))
 
     def forward_fuse(self, x):
         """Apply convolution and activation without batch normalization.
@@ -86,7 +159,7 @@ class Conv(nn.Module):
         Returns:
             (torch.Tensor): Output tensor.
         """
-        return self.act(self.conv(x))
+        return self.lab(self.act(self.conv(x)))
 
 
 class Conv2(Conv):
@@ -157,7 +230,7 @@ class LightConv(nn.Module):
         conv2 (DWConv): Depthwise convolution layer.
     """
 
-    def __init__(self, c1, c2, k=1, act=nn.ReLU()):
+    def __init__(self, c1, c2, k=1, act=nn.ReLU(), use_lab=False):
         """Initialize LightConv layer with given parameters.
 
         Args:
@@ -165,10 +238,12 @@ class LightConv(nn.Module):
             c2 (int): Number of output channels.
             k (int): Kernel size for depthwise convolution.
             act (nn.Module): Activation function.
+            use_lab (bool): Apply LearnableAffineBlock on the depthwise (activated) conv only.
         """
         super().__init__()
-        self.conv1 = Conv(c1, c2, 1, act=False)
-        self.conv2 = DWConv(c2, c2, k, act=act)
+        # Official LightConvBNAct: conv1 has no act/LAB; conv2 has act (+ optional LAB).
+        self.conv1 = Conv(c1, c2, 1, act=False, use_lab=False)
+        self.conv2 = DWConv(c2, c2, k, act=act, use_lab=use_lab)
 
     def forward(self, x):
         """Apply 2 convolutions to input tensor.
@@ -185,7 +260,7 @@ class LightConv(nn.Module):
 class DWConv(Conv):
     """Depth-wise convolution module."""
 
-    def __init__(self, c1, c2, k=1, s=1, d=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, d=1, act=True, use_lab=False):
         """Initialize depth-wise convolution with given parameters.
 
         Args:
@@ -195,8 +270,9 @@ class DWConv(Conv):
             s (int): Stride.
             d (int): Dilation.
             act (bool | nn.Module): Activation function.
+            use_lab (bool): If True and activation is enabled, append LearnableAffineBlock.
         """
-        super().__init__(c1, c2, k, s, g=math.gcd(c1, c2), d=d, act=act)
+        super().__init__(c1, c2, k, s, g=math.gcd(c1, c2), d=d, act=act, use_lab=use_lab)
 
 
 class DWConvTranspose2d(nn.ConvTranspose2d):

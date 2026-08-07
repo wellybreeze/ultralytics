@@ -19,6 +19,7 @@ from ultralytics.utils import (
     ASSETS,
     DEFAULT_CFG_DICT,
     LOGGER,
+    PLATFORM_URL,
     RANK,
     SETTINGS,
     YAML,
@@ -32,7 +33,7 @@ class Model(torch.nn.Module):
 
     This class provides a common interface for various operations related to YOLO models, such as training, validation,
     prediction, exporting, and benchmarking. It handles different types of models, including those loaded from local
-    files, Ultralytics HUB, or Triton Server.
+    files or Triton Server.
 
     Attributes:
         callbacks (dict): A dictionary of callback functions for various events during model operations.
@@ -44,7 +45,6 @@ class Model(torch.nn.Module):
         ckpt_path (str): The path to the checkpoint file.
         overrides (dict): A dictionary of overrides for model configuration.
         metrics (ultralytics.utils.metrics.DetMetrics): The latest training/validation metrics.
-        session (HUBTrainingSession): The Ultralytics HUB session, if applicable.
         task (str): The type of task the model is intended for.
         model_name (str): The name of the model.
 
@@ -88,19 +88,18 @@ class Model(torch.nn.Module):
         """Initialize a new instance of the YOLO model class.
 
         This constructor sets up the model based on the provided model path or name. It handles various types of model
-        sources, including local files, Ultralytics HUB models, and Triton Server models. The method initializes several
-        important attributes of the model and prepares it for operations like training, prediction, or export.
+        sources, including local files and Triton Server models. The method initializes several important attributes of
+        the model and prepares it for operations like training, prediction, or export.
 
         Args:
-            model (str | Path | Model): Path or name of the model to load or create. Can be a local file path, a model
-                name from Ultralytics HUB, a Triton Server model, or an already initialized Model instance.
+            model (str | Path | Model): Path or name of the model to load or create. Can be a local file path, a Triton
+                Server model, or an already initialized Model instance.
             task (str, optional): The specific task for the model. If None, it will be inferred from the config.
             verbose (bool): If True, enables verbose output during the model's initialization and subsequent operations.
 
         Raises:
             FileNotFoundError: If the specified model file does not exist or is inaccessible.
             ValueError: If the model file or configuration is invalid or unsupported.
-            ImportError: If required dependencies for specific model types (like HUB SDK) are not installed.
         """
         if isinstance(model, Model):
             self.__dict__ = model.__dict__  # accepts an already initialized Model
@@ -115,24 +114,12 @@ class Model(torch.nn.Module):
         self.ckpt_path = None
         self.overrides = {}  # overrides for trainer object
         self.metrics = None  # validation/training metrics
-        self.session = None  # HUB session
         self.task = task  # task type
         self.model_name = None  # model name
         model = str(model).strip()
 
-        # Check if Ultralytics HUB model from https://hub.ultralytics.com
-        if self.is_hub_model(model):
-            from ultralytics.hub import HUBTrainingSession
-
-            # Fetch model from HUB
-            checks.check_requirements("hub-sdk>=0.0.12")
-            session = HUBTrainingSession.create_session(model)
-            model = session.model_file
-            if session.train_args:  # training sent from HUB
-                self.session = session
-
         # Check if Triton Server model
-        elif self.is_triton_model(model):
+        if self.is_triton_model(model):
             self.model_name = self.model = model
             self.overrides["task"] = task or "detect"  # set `task=detect` if not explicitly set
             return
@@ -200,29 +187,6 @@ class Model(torch.nn.Module):
 
         url = urlsplit(model)
         return url.netloc and url.path and url.scheme in {"http", "grpc"}
-
-    @staticmethod
-    def is_hub_model(model: str) -> bool:
-        """Check if the provided model is an Ultralytics HUB model.
-
-        This static method determines whether the given model string represents a valid Ultralytics HUB model
-        identifier.
-
-        Args:
-            model (str): The model string to check.
-
-        Returns:
-            (bool): True if the model is a valid Ultralytics HUB model, False otherwise.
-
-        Examples:
-            >>> Model.is_hub_model("https://hub.ultralytics.com/models/MODEL")
-            True
-            >>> Model.is_hub_model("yolo26n.pt")
-            False
-        """
-        from ultralytics.hub import HUB_WEB_ROOT
-
-        return model.startswith(f"{HUB_WEB_ROOT}/models/")
 
     def _new(self, cfg: str, task=None, model=None, verbose=False) -> None:
         """Initialize a new model and infer the task type from model definitions.
@@ -397,7 +361,7 @@ class Model(torch.nn.Module):
 
         updates = {
             "model": deepcopy(self.model).half() if isinstance(self.model, torch.nn.Module) else self.model,
-            "date": datetime.now().isoformat(),
+            "date": datetime.now().astimezone().isoformat(),
             "version": __version__,
             "license": "AGPL-3.0 License (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
@@ -427,7 +391,7 @@ class Model(torch.nn.Module):
         self._check_is_pytorch_model()
         return self.model.info(detailed=detailed, verbose=verbose, imgsz=imgsz)
 
-    def fuse(self) -> Model:
+    def fuse(self, verbose: bool = True, imgsz: int | list[int, int] = 640) -> Model:
         """Fuse Conv2d and BatchNorm2d layers in the model for optimized inference.
 
         This method iterates through the model's modules and fuses consecutive Conv2d and BatchNorm2d layers into a
@@ -438,13 +402,18 @@ class Model(torch.nn.Module):
         bias) into the preceding Conv2d layer's weights and biases. This results in a single Conv2d layer that
         performs both convolution and normalization in one step.
 
+        Args:
+            verbose (bool): Whether to print model information after fusion.
+            imgsz (int | list[int, int]): Input image size used for FLOPs calculation.
+
         Examples:
             >>> model = Model("yolo26n.pt")
             >>> model.fuse()
             >>> # Model is now fused and ready for optimized inference
         """
         self._check_is_pytorch_model()
-        self.model.fuse()
+        # DistillationModel fuses to its student, so adopt the return
+        self.model = self.model.fuse(verbose=verbose, imgsz=imgsz)
         return self
 
     def embed(
@@ -621,6 +590,48 @@ class Model(torch.nn.Module):
         self.metrics = validator.metrics
         return validator.metrics
 
+    def calibrate(self, data=None, **kwargs: Any):
+        """Fit scale-only depth calibration on a small labeled set (depth task only).
+
+        Runs a validation pass, then fits the global log-affine ``d' = exp(a·log d + b)`` against
+        ground-truth depth via :func:`fit_calibration_selective` — the same "calibrate only if it
+        helps" policy as trainer auto-calibration (identity / scale-only chosen by held-out δ1) —
+        which writes ``(a, b)`` into the head's ``cal_a``/``cal_b`` buffers. No gradient training
+        and the decoder weights are untouched, so it cannot degrade the relative depth structure.
+        Call ``model.save(...)`` afterwards to persist the calibration.
+
+        Args:
+            data (str, optional): Dataset YAML providing a labeled split to calibrate against.
+            **kwargs (Any): Extra validation arguments (e.g. ``imgsz``, ``batch``, ``device``, ``split``).
+
+        Returns:
+            (tuple | None): The fitted ``(a, b)``, or ``None`` if fewer than 2 images had valid depth pixels.
+
+        Examples:
+            >>> model = YOLO("yolo26s-depth.pt")
+            >>> model.calibrate(data="my_depth_dataset.yaml")
+            >>> model.save("yolo26s-depth-calibrated.pt")
+        """
+        self._check_is_pytorch_model()
+        if self.task != "depth":
+            raise ValueError(f"calibrate() is only supported for depth models (task='depth'), got task={self.task!r}.")
+        from ultralytics.models.yolo.depth.calibrate import _depth_head, fit_calibration_selective
+
+        if _depth_head(self.model) is None:
+            raise ValueError("Model has no Depth head with calibration buffers (cal_a/cal_b).")
+        args = {**self.overrides, **kwargs, "mode": "val", "task": "depth", "rect": False}
+        if data is not None:
+            args["data"] = data
+        validator = self._smart_load("validator")(args=args, _callbacks=self.callbacks)
+        validator(model=self.model)  # builds the dataloader and reports metrics with the current calibration
+        res = fit_calibration_selective(
+            self.model, validator.dataloader, validator.device, max_depth=validator.data.get("max_depth") or 100.0
+        )
+        if res is None:
+            return None
+        LOGGER.info("Call model.save(...) to persist the calibration.")
+        return res["a"], res["b"]
+
     def benchmark(self, data=None, format="", verbose=False, **kwargs: Any):
         """Benchmark the model across various export formats to evaluate performance.
 
@@ -709,7 +720,7 @@ class Model(torch.nn.Module):
             'path/to/exported/model.onnx'
         """
         self._check_is_pytorch_model()
-        from .exporter import Exporter
+        from .exporter import Exporter, export_formats
 
         custom = {
             "imgsz": self.model.args["imgsz"],
@@ -719,7 +730,16 @@ class Model(torch.nn.Module):
             "verbose": False,
         }  # method defaults
         args = {**self.overrides, **custom, **kwargs, "mode": "export"}  # highest priority args on the right
-        return Exporter(overrides=args, _callbacks=self.callbacks)(model=self.model)
+        try:
+            return Exporter(overrides=args, _callbacks=self.callbacks)(model=self.model)
+        except Exception:
+            formats = export_formats()
+            export_format = args.get("format", DEFAULT_CFG_DICT["format"])
+            format_name = dict(zip(formats["Argument"], formats["Format"])).get(
+                str(export_format).lower(), export_format
+            )
+            LOGGER.info(f"Export to {format_name} in the cloud with Ultralytics Platform: {PLATFORM_URL}")
+            raise
 
     def train(
         self,
@@ -730,11 +750,8 @@ class Model(torch.nn.Module):
 
         This method facilitates model training with a range of customizable settings. It supports training with a custom
         trainer or the default training approach. The method handles scenarios such as resuming training from a
-        checkpoint, integrating with Ultralytics HUB, and updating model and configuration after training.
-
-        When using Ultralytics HUB, if the session has a loaded model, the method prioritizes HUB training arguments and
-        warns if local arguments are provided. It checks for pip updates and combines default configurations,
-        method-specific defaults, and user-provided arguments to configure the training process.
+        checkpoint and updating model and configuration after training. It checks for pip updates and combines default
+        configurations, method-specific defaults, and user-provided arguments to configure the training process.
 
         Args:
             trainer (BaseTrainer, optional): Custom trainer instance for model training. If None, uses default.
@@ -762,11 +779,6 @@ class Model(torch.nn.Module):
             >>> multi = model.train(data=["coco8.yaml", "african-wildlife.yaml"], epochs=3)  # fine-tune across datasets
         """
         self._check_is_pytorch_model()
-        if hasattr(self.session, "model") and self.session.model.id:  # Ultralytics HUB session with loaded model
-            if any(kwargs):
-                LOGGER.warning("using HUB training arguments, ignoring local training arguments.")
-            kwargs = self.session.train_args  # overwrite kwargs
-
         checks.check_pip_update_available()
 
         overrides = YAML.load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
@@ -778,7 +790,7 @@ class Model(torch.nn.Module):
             "model": self.overrides["model"],
             "task": self.task,
         }  # method defaults
-        args = {**overrides, **custom, **kwargs, "mode": "train", "session": self.session}  # prioritizes rightmost args
+        args = {**overrides, **custom, **kwargs, "mode": "train"}  # prioritizes rightmost args
         if isinstance(args.get("data"), (list, tuple)):  # fine-tune a single base model across multiple datasets
             from ultralytics.engine.trainer import MultiTrainer
 
@@ -792,17 +804,16 @@ class Model(torch.nn.Module):
             self.metrics = self.trainer.train()
             return self.metrics
         pretrained = kwargs.get("pretrained", overrides.get("pretrained", True) if kwargs.get("cfg") else True)
-        if args.get("resume"):
-            if args["resume"] is True:  # resume=True (boolean) uses current model as checkpoint
-                if self.ckpt and self.ckpt.get("epoch", -1) >= 0 and self.ckpt.get("optimizer") is not None:
-                    args["resume"] = self.ckpt_path
-                else:
-                    LOGGER.warning(
-                        f"model '{self.ckpt_path}' is not a resumable training checkpoint "
-                        f"(missing epoch/optimizer state). Use 'resume' only to continue incomplete training. "
-                        f"Starting new training instead."
-                    )
-                    args["resume"] = False
+        if args.get("resume") is True:  # resume=True (boolean) uses current model as checkpoint
+            if self.ckpt and self.ckpt.get("epoch", -1) >= 0 and self.ckpt.get("optimizer") is not None:
+                args["resume"] = self.ckpt_path
+            else:
+                LOGGER.warning(
+                    f"model '{self.ckpt_path}' is not a resumable training checkpoint "
+                    f"(missing epoch/optimizer state). Use 'resume' only to continue incomplete training. "
+                    f"Starting new training instead."
+                )
+                args["resume"] = False
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume") and self.ckpt:
@@ -868,7 +879,7 @@ class Model(torch.nn.Module):
         if use_ray:
             from ultralytics.utils.tuner import run_ray_tune
 
-            return run_ray_tune(self, iterations=iterations, *args, **kwargs)
+            return run_ray_tune(self, *args, iterations=iterations, **kwargs)
         else:
             from .tuner import Tuner
 
@@ -898,7 +909,7 @@ class Model(torch.nn.Module):
             >>> model = model._apply(lambda t: t.cuda())  # Move model to GPU
         """
         self._check_is_pytorch_model()
-        self = super()._apply(fn)
+        super()._apply(fn)
         self.predictor = None  # reset predictor as device may have changed
         self.overrides["device"] = self.device  # was str(self.device) i.e. device(type='cuda', index=0) -> 'cuda:0'
         return self
@@ -1043,7 +1054,7 @@ class Model(torch.nn.Module):
             >>> model.reset_callbacks()
             # All callbacks are now reset to their default functions
         """
-        for event in callbacks.default_callbacks.keys():
+        for event in callbacks.default_callbacks:
             self.callbacks[event] = [callbacks.default_callbacks[event][0]]
 
     @staticmethod
@@ -1068,11 +1079,6 @@ class Model(torch.nn.Module):
         """
         include = {"imgsz", "data", "task", "single_cls"}  # only remember these arguments when loading a PyTorch model
         return {k: v for k, v in args.items() if k in include}
-
-    # def __getattr__(self, attr):
-    #    """Raises error if object has no requested attribute."""
-    #    name = self.__class__.__name__
-    #    raise AttributeError(f"'{name}' object has no attribute '{attr}'. See valid attributes below.\n{self.__doc__}")
 
     def _smart_load(self, key: str):
         """Intelligently load the appropriate module based on the model task.

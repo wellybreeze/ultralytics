@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 __all__ = (
     "CBAM",
@@ -148,7 +148,9 @@ class Conv(nn.Module):
         Returns:
             (torch.Tensor): Output tensor.
         """
-        return self.lab(self.act(self.bn(self.conv(x))))
+        x = self.act(self.bn(self.conv(x)))
+        # Older .pt checkpoints pickle Conv without `lab` (added for D-FINE use_lab).
+        return self.lab(x) if hasattr(self, "lab") else x
 
     def forward_fuse(self, x):
         """Apply convolution and activation without batch normalization.
@@ -159,7 +161,8 @@ class Conv(nn.Module):
         Returns:
             (torch.Tensor): Output tensor.
         """
-        return self.lab(self.act(self.conv(x)))
+        x = self.act(self.conv(x))
+        return self.lab(x) if hasattr(self, "lab") else x
 
 
 class Conv2(Conv):
@@ -230,7 +233,7 @@ class LightConv(nn.Module):
         conv2 (DWConv): Depthwise convolution layer.
     """
 
-    def __init__(self, c1, c2, k=1, act=nn.ReLU(), use_lab=False):
+    def __init__(self, c1, c2, k=1, act=None, use_lab=False):
         """Initialize LightConv layer with given parameters.
 
         Args:
@@ -242,6 +245,7 @@ class LightConv(nn.Module):
         """
         super().__init__()
         # Official LightConvBNAct: conv1 has no act/LAB; conv2 has act (+ optional LAB).
+        act = nn.ReLU() if act is None else act
         self.conv1 = Conv(c1, c2, 1, act=False, use_lab=False)
         self.conv2 = DWConv(c2, c2, k, act=act, use_lab=use_lab)
 

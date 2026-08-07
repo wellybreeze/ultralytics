@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -155,7 +155,7 @@ class HGBlock(nn.Module):
         lightconv: bool = False,
         shortcut: bool = False,
         use_lab: bool = False,
-        act: nn.Module = nn.ReLU(),
+        act: nn.Module | None = None,
     ):
         """Initialize HGBlock with specified parameters.
 
@@ -171,6 +171,7 @@ class HGBlock(nn.Module):
             act (nn.Module): Activation function.
         """
         super().__init__()
+        act = nn.ReLU() if act is None else act
         block = LightConv if lightconv else Conv
         self.m = nn.ModuleList(
             block(c1 if i == 0 else cm, cm, k=k, act=act, use_lab=use_lab) for i in range(n)
@@ -1477,7 +1478,7 @@ class C2PSA(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv(2 * self.c, c1, 1)
 
-        self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n)))
+        self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=max(self.c // 64, 1)) for _ in range(n)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Process the input tensor through a series of PSA blocks.
@@ -2004,7 +2005,8 @@ class Proto26(Proto):
         feat = x[0]
         for i, f in enumerate(self.feat_refine):
             up_feat = f(x[i + 1])
-            up_feat = F.interpolate(up_feat, size=feat.shape[2:], mode="nearest")
+            # Constant scale (P4/P5 -> P3) keeps the upsample static for dynamic-shape CoreML export
+            up_feat = F.interpolate(up_feat, scale_factor=2 ** (i + 1), mode="nearest")
             feat = feat + up_feat
         p = super().forward(self.feat_fuse(feat))
         if self.training and return_semantic:

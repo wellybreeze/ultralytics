@@ -67,7 +67,7 @@ def test_export_onnx(end2end, isolated_model):
 @pytest.mark.parametrize("precision", [{"int8": True}, {"quantize": 8}])
 def test_export_onnx_int8(isolated_model, precision):
     """Test INT8 ONNX export via both the legacy int8 alias and the unified quantize arg."""
-    file = YOLO(isolated_model).export(format="onnx", data="coco8.yaml", fraction=0.25, imgsz=32, **precision)
+    file = YOLO(isolated_model).export(format="onnx", data=Path("coco8.yaml"), fraction=0.25, imgsz=32, **precision)
     assert Path(file).name.endswith("_int8.onnx")
     YOLO(file)(SOURCE, imgsz=32)  # exported model inference
     Path(file).unlink()  # cleanup
@@ -660,15 +660,14 @@ def test_export_executorch_matrix(task):
 
 
 @pytest.mark.skipif(
-    not (WINDOWS or (LINUX and ARM64)) or sys.version_info < (3, 11),
-    reason="onnxruntime-qnn ships prebuilt wheels only for Windows (x64/ARM64) and Linux ARM64 on Python>=3.11",
+    not (WINDOWS or LINUX) or sys.version_info < (3, 11),
+    reason="onnxruntime-qnn ships prebuilt wheels only for Windows and Linux on Python>=3.11",
 )
 def test_export_qnn(isolated_model):
     """Test YOLO export to Qualcomm QNN format via the ONNX Runtime QNN Execution Provider."""
     import importlib.util
 
-    # QNN EP ships either as the 'onnxruntime_qnn' plugin module (Windows/Linux-aarch64) or as a provider library
-    # bundled in onnxruntime/capi (Linux x86-64). Skip cleanly only when neither is present.
+    # QNN EP ships either as the 'onnxruntime_qnn' plugin module or as a provider library bundled in onnxruntime/capi.
     has_qnn = importlib.util.find_spec("onnxruntime_qnn") is not None
     if not has_qnn and importlib.util.find_spec("onnxruntime") is not None:
         import onnxruntime

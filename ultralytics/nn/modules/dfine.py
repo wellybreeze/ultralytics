@@ -380,10 +380,13 @@ class TransformerDecoder(nn.Module):
         return value.permute(0, 2, 3, 1).split(split_shape, dim=-1)
 
     def convert_to_deploy(self):
-        """Trim layers after eval_idx and freeze weighting projection for export."""
+        """Trim layers after eval_idx and freeze weighting projection for export (idempotent)."""
+        if getattr(self, "_deployed", False):
+            return
         self.project = weighting_function(self.reg_max, self.up, self.reg_scale, deploy=True)
         self.layers = self.layers[: self.eval_idx + 1]
         self.lqe_layers = nn.ModuleList([nn.Identity()] * self.eval_idx + [self.lqe_layers[self.eval_idx]])
+        self._deployed = True
 
     def forward(
         self,
@@ -467,9 +470,9 @@ class DFINEDecoder(nn.Module):
     max_det = 300
     shapes = []
     dynamic = False
-    # anchors / valid_mask: registered as buffers when eval_spatial_size is set (official parity);
-    # otherwise assigned lazily in _get_decoder_input. Do not use class-level Tensor placeholders —
-    # they block register_buffer().
+    # anchors / valid_mask: optional buffers when eval_spatial_size is set (fixed-size cache);
+    # otherwise assigned lazily in _get_decoder_input when spatial_shapes change (RTDETRDecoder parity).
+    # Do not use class-level Tensor placeholders — they block register_buffer().
 
     def __init__(
         self,
@@ -491,7 +494,7 @@ class DFINEDecoder(nn.Module):
         # Official kwargs with defaults
         activation: str = "relu",
         learn_query_content: bool = False,
-        eval_spatial_size: tuple[int, int] | None = (640, 640),
+        eval_spatial_size: tuple[int, int] | None = None,
         feat_strides: list[int] | tuple[int, ...] | None = None,
         num_levels: int | None = None,
         eps: float = 1e-2,
@@ -520,7 +523,7 @@ class DFINEDecoder(nn.Module):
             num_points: Sampling points per level (list) or shared int.
             activation: FFN / MLP activation name.
             learn_query_content: Learn query embeddings instead of encoder top-k features.
-            eval_spatial_size: Optional (H, W) to precompute anchors.
+            eval_spatial_size: Optional fixed (H, W) to precompute anchors; None rebuilds from feature shapes.
             feat_strides: Feature strides aligned with ``ch``.
             num_levels: Feature levels (defaults to ``len(ch)``).
             eps: Anchor validity epsilon.
@@ -653,7 +656,9 @@ class DFINEDecoder(nn.Module):
         self._reset_parameters(feat_channels)
 
     def convert_to_deploy(self):
-        """Prepare score / bbox heads for deployment (keep only eval layer)."""
+        """Prepare score / bbox heads for deployment (keep only eval layer; idempotent)."""
+        if getattr(self, "_deployed", False):
+            return
         self.dec_score_head = nn.ModuleList(
             [nn.Identity()] * self.eval_idx + [self.dec_score_head[self.eval_idx]]
         )
@@ -661,6 +666,7 @@ class DFINEDecoder(nn.Module):
             [self.dec_bbox_head[i] if i <= self.eval_idx else nn.Identity() for i in range(len(self.dec_bbox_head))]
         )
         self.decoder.convert_to_deploy()
+        self._deployed = True
 
     def _reset_parameters(self, feat_channels: list[int]):
         """Initialize heads and projections like official DFINETransformer."""
@@ -755,9 +761,10 @@ class DFINEDecoder(nn.Module):
 
         anchors = []
         for lvl, (h, w) in enumerate(spatial_shapes):
+            # Match official DFINETransformer: int meshgrid then divide by float size tensor.
             grid_y, grid_x = torch.meshgrid(
-                torch.arange(h, dtype=dtype, device=device),
-                torch.arange(w, dtype=dtype, device=device),
+                torch.arange(h, device=device),
+                torch.arange(w, device=device),
                 indexing="ij",
             )
             grid_xy = torch.stack([grid_x, grid_y], dim=-1)
@@ -779,15 +786,13 @@ class DFINEDecoder(nn.Module):
         denoising_bbox_unact: torch.Tensor | None = None,
     ):
         """Select top-k encoder queries and optionally concatenate CDN queries."""
-        if self.training or self.eval_spatial_size is None:
-            if self.dynamic or self.shapes != spatial_shapes:
-                self.anchors, self.valid_mask = self._generate_anchors(
-                    spatial_shapes, dtype=memory.dtype, device=memory.device
-                )
-                self.shapes = spatial_shapes
-            anchors, valid_mask = self.anchors, self.valid_mask
-        else:
-            anchors, valid_mask = self.anchors, self.valid_mask
+        # Rebuild when feature map sizes change (any imgsz), matching RTDETRDecoder.
+        if self.dynamic or self.shapes != spatial_shapes:
+            self.anchors, self.valid_mask = self._generate_anchors(
+                spatial_shapes, dtype=memory.dtype, device=memory.device
+            )
+            self.shapes = spatial_shapes
+        anchors, valid_mask = self.anchors, self.valid_mask
 
         if memory.shape[0] > 1 and anchors.shape[0] == 1:
             anchors = anchors.repeat(memory.shape[0], 1, 1)

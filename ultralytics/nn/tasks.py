@@ -1223,6 +1223,38 @@ class DFINEDetectionModel(RTDETRDetectionModel):
         if self.yaml.get("freeze_norm", False):
             self._freeze_backbone_norm()
 
+    def fuse(self, verbose=True, imgsz=640):
+        """Fuse like official ``DFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
+
+        Official deploy calls ``convert_to_deploy`` on ``ConvNormLayer_fuse`` / ``VGGBlock`` / decoder
+        heads. YAML maps HybridEncoder ``lateral_convs`` to top-level ``Conv(..., act=False)`` layers
+        immediately before ``Upsample``; fuse those only. Do not fuse HGNetv2 / ``input_proj`` Convs
+        (official leaves them unfused). YOLO / RT-DETR ``BaseModel.fuse`` is unchanged.
+        """
+        if not self.is_fused():
+            for m in self.modules():
+                if hasattr(m, "convert_to_deploy"):
+                    m.convert_to_deploy()
+            # Lateral Convs: Identity-act Conv whose next sibling is Upsample (official lateral_convs).
+            for i, m in enumerate(self.model[:-1]):
+                nxt = self.model[i + 1]
+                if not isinstance(m, Conv) or not hasattr(m, "bn"):
+                    continue
+                if not isinstance(m.act, nn.Identity):
+                    continue
+                if not isinstance(nxt, nn.Upsample) and type(nxt).__name__ != "Upsample":
+                    continue
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)
+                delattr(m, "bn")
+                m.forward = m.forward_fuse
+            self._dfine_deployed = True
+            self.info(verbose=verbose, imgsz=imgsz)
+        return self
+
+    def is_fused(self, thresh=10):
+        """Return True after official-style ``convert_to_deploy`` (backbone BN intentionally kept)."""
+        return bool(getattr(self, "_dfine_deployed", False))
+
     def _align_official_batchnorm(self):
         """Reset BatchNorm2d hyperparameters to official D-FINE defaults (eps=1e-5, momentum=0.1)."""
         for m in self.modules():

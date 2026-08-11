@@ -73,7 +73,9 @@ class ConvNormLayer_fuse(nn.Module):
         return self.act(y)
 
     def convert_to_deploy(self):
-        """Fuse Conv+BN into a single biased Conv2d."""
+        """Fuse Conv+BN into a single biased Conv2d (idempotent)."""
+        if hasattr(self, "conv_bn_fused") and not hasattr(self, "conv"):
+            return
         if not hasattr(self, "conv_bn_fused"):
             self.conv_bn_fused = nn.Conv2d(
                 self.ch_in,
@@ -164,7 +166,9 @@ class VGGBlock(nn.Module):
         return self.act(y)
 
     def convert_to_deploy(self):
-        """Fuse parallel 3x3/1x1 branches into one 3x3 conv."""
+        """Fuse parallel 3x3/1x1 branches into one 3x3 conv (idempotent)."""
+        if hasattr(self, "conv") and not hasattr(self, "conv1"):
+            return
         if not hasattr(self, "conv"):
             self.conv = nn.Conv2d(self.ch_in, self.ch_out, 3, 1, padding=1)
         kernel, bias = self.get_equivalent_kernel_bias()

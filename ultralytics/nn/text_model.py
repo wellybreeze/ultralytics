@@ -8,8 +8,8 @@ from pathlib import Path
 import os
 
 import torch
-import torch.nn as nn
 from PIL import Image
+from torch import nn
 
 from ultralytics.utils import WEIGHTS_DIR, checks
 from ultralytics.utils.torch_utils import smart_inference_mode
@@ -38,12 +38,10 @@ class TextModel(nn.Module):
     @abstractmethod
     def tokenize(self, texts):
         """Convert input texts to tokens for model processing."""
-        pass
 
     @abstractmethod
     def encode_text(self, texts, dtype):
         """Encode tokenized texts into normalized feature vectors."""
-        pass
 
 
 class CLIP(TextModel):

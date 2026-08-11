@@ -47,10 +47,10 @@ FastSAM is designed to address the limitations of the [Segment Anything Model (S
 
 This table presents the available models with their specific pretrained weights, the tasks they support, and their compatibility with different operating modes like [Inference](../modes/predict.md), [Validation](../modes/val.md), [Training](../modes/train.md), and [Export](../modes/export.md), indicated by ✅ emojis for supported modes and ❌ emojis for unsupported modes.
 
-| Model Type | Pretrained Weights                                                                          | Tasks Supported                              | Inference | Validation | Training | Export |
-| ---------- | ------------------------------------------------------------------------------------------- | -------------------------------------------- | --------- | ---------- | -------- | ------ |
-| FastSAM-s  | [FastSAM-s.pt](https://github.com/ultralytics/assets/releases/download/v8.4.0/FastSAM-s.pt) | [Instance Segmentation](../tasks/segment.md) | ✅        | ❌         | ❌       | ✅     |
-| FastSAM-x  | [FastSAM-x.pt](https://github.com/ultralytics/assets/releases/download/v8.4.0/FastSAM-x.pt) | [Instance Segmentation](../tasks/segment.md) | ✅        | ❌         | ❌       | ✅     |
+| Model Type | Pretrained Weights                                                                          | Tasks Supported                              | Training | Validation | Inference | Export |
+| ---------- | ------------------------------------------------------------------------------------------- | -------------------------------------------- | -------- | ---------- | --------- | ------ |
+| FastSAM-s  | [FastSAM-s.pt](https://github.com/ultralytics/assets/releases/download/v8.4.0/FastSAM-s.pt) | [Instance Segmentation](../tasks/segment.md) | ❌       | ❌         | ✅        | ✅     |
+| FastSAM-x  | [FastSAM-x.pt](https://github.com/ultralytics/assets/releases/download/v8.4.0/FastSAM-x.pt) | [Instance Segmentation](../tasks/segment.md) | ❌       | ❌         | ✅        | ✅     |
 
 ## FastSAM Comparison vs YOLO
 
@@ -154,7 +154,7 @@ This snippet demonstrates the simplicity of loading a pretrained model and runni
         from ultralytics.models.fastsam import FastSAMPredictor
 
         # Create FastSAMPredictor
-        overrides = dict(conf=0.25, task="segment", mode="predict", model="FastSAM-s.pt", save=False, imgsz=1024)
+        overrides = {"conf": 0.25, "task": "segment", "mode": "predict", "model": "FastSAM-s.pt", "save": False, "imgsz": 1024}
         predictor = FastSAMPredictor(overrides=overrides)
 
         # Segment everything

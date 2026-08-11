@@ -15,10 +15,14 @@ from PIL import Image
 
 from ultralytics.data.utils import (
     IMG_FORMATS,
+    dataset_root as _dataset_root,
     exif_size,
     get_hash,
     img2label_paths,
     load_dataset_cache_file,
+    portable_paths_hash,
+    rel_path_key as _rel_key,
+    remap_label_im_files,
     save_dataset_cache_file,
 )
 from ultralytics.utils import LOGGER, ROOT, TQDM, YAML, colorstr
@@ -834,69 +838,11 @@ def merge_labels(gt: np.ndarray, pseudo: np.ndarray, nc_gt: int) -> np.ndarray:
     return np.concatenate(parts, 0) if parts else np.zeros((0, 5), dtype=np.float32)
 
 
-def _dataset_root(data: dict | None = None, im_files: list[str] | None = None) -> Path | None:
-    """Best-effort dataset root for portable relative paths."""
-    if data and data.get("path"):
-        return Path(data["path"])
-    if im_files:
-        return Path(im_files[0]).parents[1] if len(Path(im_files[0]).parts) > 1 else Path(im_files[0]).parent
-    return None
-
-
-def _rel_key(path: str | Path, root: Path | None) -> str:
-    """Path key relative to dataset root (posix); fallback to last 3 parts / name."""
-    p = Path(path)
-    if root is not None:
-        try:
-            return p.resolve().relative_to(Path(root).resolve()).as_posix()
-        except (ValueError, OSError):
-            pass
-    parts = p.parts
-    if len(parts) >= 3:
-        return Path(*parts[-3:]).as_posix()
-    return p.name
-
-
 def _resource_key(path: str | Path | None) -> str:
     """Stable identity for model/config paths across machines (basename)."""
     if path is None or not str(path).strip():
         return ""
     return Path(str(path)).name
-
-
-def portable_paths_hash(paths: list[str], root: Path | None = None) -> str:
-    """Like ``get_hash`` but hashes relative keys so caches move across machines."""
-    size = 0
-    keys: list[str] = []
-    for p in paths:
-        keys.append(_rel_key(p, root))
-        try:
-            size += os.stat(p).st_size
-        except OSError:
-            continue
-    h = __import__("hashlib").sha256(str(size).encode())
-    h.update("\n".join(keys).encode())
-    return h.hexdigest()
-
-
-def remap_label_im_files(
-    labels: list[dict],
-    im_files: list[str],
-    root: Path | None = None,
-) -> list[dict]:
-    """Rewrite ``im_file`` in cache labels to current absolute paths (by relative key / basename)."""
-    by_name = {Path(im).name: im for im in im_files}
-    by_rel = {_rel_key(im, root): im for im in im_files}
-    out: list[dict] = []
-    for lb in labels:
-        old = str(lb.get("im_file", ""))
-        new = by_rel.get(_rel_key(old, root)) or by_name.get(Path(old).name)
-        if new is None:
-            continue
-        e = dict(lb)
-        e["im_file"] = new
-        out.append(e)
-    return out
 
 
 def _meta_hash(

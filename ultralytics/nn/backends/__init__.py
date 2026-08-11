@@ -6,6 +6,7 @@ Each backend implements the `BaseBackend` interface and can be used independentl
 `AutoBackend` dispatcher for automatic format detection and inference routing.
 """
 
+from .ascend import AscendBackend
 from .axelera import AxeleraBackend
 from .base import BaseBackend
 from .coreml import CoreMLBackend
@@ -27,6 +28,7 @@ from .triton import TritonBackend
 from .wedetect_dual import WeDetectDualBackend, is_wedetect_dual_weight, resolve_wedetect_dual_pair
 
 __all__ = [
+    "AscendBackend",
     "AxeleraBackend",
     "BaseBackend",
     "CoreMLBackend",

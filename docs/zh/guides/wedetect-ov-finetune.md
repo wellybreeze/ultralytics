@@ -22,13 +22,13 @@ model.export(format="onnx"|"engine", export_mode="dual")
 PyTorch / dual ONNX|engine：set_classes + predict
 ```
 
-| 阶段                   | 关键产物                                                         |
-| ---------------------- | ---------------------------------------------------------------- |
-| 微调                   | `best.pt` / `last.pt`（视觉 + `text_model_weights`）        |
-| 导出 dual ONNX（推荐） | `*_vision.onnx` + `*_language.onnx`                            |
-| 导出 dual TensorRT     | `*_vision.engine` + `*_language.engine`                        |
-| 导出 whole             | `*_whole.onnx`（官方 predict/engine 不接，走示例脚本）        |
-| 推理                   | 任意中文/多语提示词（分词在 Python，不进图）                     |
+| 阶段                   | 关键产物                                                   |
+| ---------------------- | ---------------------------------------------------------- |
+| 微调                   | `best.pt` / `last.pt`（视觉 + `text_model_weights`） |
+| 导出 dual ONNX（推荐） | `*_vision.onnx` + `*_language.onnx`                    |
+| 导出 dual TensorRT     | `*_vision.engine` + `*_language.engine`                |
+| 导出 whole             | `*_whole.onnx`（官方 predict/engine 不接，走示例脚本）   |
+| 推理                   | 任意中文/多语提示词（分词在 Python，不进图）               |
 
 ---
 
@@ -581,7 +581,7 @@ model.export(
 )
 ```
 
-> `nms=True` 时：TensorRT ≤10 在 vision ONNX 上挂 `EfficientNMS_TRT` 插件；**TensorRT 11+ 已移除该插件**，改为构建时注入原生 `INMSLayer`（推理 API 相同）。带插件的中间 ONNX **不能**用普通 ONNX Runtime 推理。  
+> `nms=True` 时：TensorRT ≤10 在 vision ONNX 上挂 `EfficientNMS_TRT` 插件；**TensorRT 11+ 已移除该插件**，改为构建时注入原生 `INMSLayer`（推理 API 相同）。带插件的中间 ONNX **不能**用普通 ONNX Runtime 推理。
 > TensorRT 11 为强类型网络，WeDetect 双塔暂不走 ModelOpt Autocast；TRT11 上请求 FP16 时会回退 FP32。需要 dual FP16 请使用 TensorRT 10.x。
 
 ### 8.3 Whole（单图内联双塔）
@@ -744,17 +744,17 @@ model.train(
 
 ## 13. 与原版 WeDetect 对照 / 对齐说明
 
-| 原版 (mmdet)                                      | Ultralytics                                                              |
-| ------------------------------------------------- | ------------------------------------------------------------------------ |
-| `wedetect_base_coco_full_tuning_*.py`           | `wedetect_finetune.yaml` + `WeDetect.train`                          |
-| `WeConcat` + 文本对齐混数                       | `wedetect_mixed.yaml` + `mix_global_texts` / `use_neg_queue`       |
-| `mask_refine` 配置                              | `wedetect_finetune_mask_refine.yaml`                                   |
-| 中文`coco_zh_class_texts.json`                  | data YAML 的`class_texts`（模板：`ultralytics/cfg/datasets/texts/`） |
-| LM 在`backbone.text_model.*`                    | 顶层`text_model_weights` + `_text_sd`（格式不同，不做互通）          |
-| `LinearLR` 1000 iter、`start_factor=0.001`    | `warmup_iters=1000` + `warmup_start_factor=0.001`                    |
-| `RandomLoadText` shuffle + `padding_value=''` | 已恢复 shuffle；multimodal padding 为空串                                |
-| grounding JSON（caption + tokens_positive）       | `train.grounding_data` + `GroundingDataset`（整份 JSON）             |
-| `deploy/export_onnx.py` dual/whole              | `model.export(..., export_mode="dual\|whole")`；dual 另支持 `format=engine` |
+| 原版 (mmdet)                                      | Ultralytics                                                                         |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `wedetect_base_coco_full_tuning_*.py`           | `wedetect_finetune.yaml` + `WeDetect.train`                                     |
+| `WeConcat` + 文本对齐混数                       | `wedetect_mixed.yaml` + `mix_global_texts` / `use_neg_queue`                  |
+| `mask_refine` 配置                              | `wedetect_finetune_mask_refine.yaml`                                              |
+| 中文`coco_zh_class_texts.json`                  | data YAML 的`class_texts`（模板：`ultralytics/cfg/datasets/texts/`）            |
+| LM 在`backbone.text_model.*`                    | 顶层`text_model_weights` + `_text_sd`（格式不同，不做互通）                     |
+| `LinearLR` 1000 iter、`start_factor=0.001`    | `warmup_iters=1000` + `warmup_start_factor=0.001`                               |
+| `RandomLoadText` shuffle + `padding_value=''` | 已恢复 shuffle；multimodal padding 为空串                                           |
+| grounding JSON（caption + tokens_positive）       | `train.grounding_data` + `GroundingDataset`（整份 JSON）                        |
+| `deploy/export_onnx.py` dual/whole              | `model.export(..., export_mode="dual\|whole")`；dual 另支持 `format=engine`      |
 | `eval_onnx.py`                                  | `WeDetect("*_vision.onnx\|.engine").set_classes(...).predict(...)`；示例脚本仍可用 |
 
 ### 已对齐（核心 OV 流程）

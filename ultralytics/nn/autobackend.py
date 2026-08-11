@@ -7,12 +7,13 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ultralytics.utils.checks import check_suffix
 from ultralytics.utils.downloads import is_url
 
 from .backends import (
+    AscendBackend,
     AxeleraBackend,
     CoreMLBackend,
     DeepXBackend,
@@ -119,6 +120,7 @@ class AutoBackend(nn.Module):
             | Qualcomm QNN          | *_qnn.onnx        |
             | LiteRT                | *.tflite          |
             | Hailo                 | *_hailo_model/    |
+            | Huawei Ascend         | *_ascend_model/   |
 
     Attributes:
         backend (BaseBackend): The loaded inference backend instance.
@@ -165,13 +167,14 @@ class AutoBackend(nn.Module):
         "qnn": QNNBackend,
         "litert": LiteRTBackend,
         "hailo": HailoBackend,
+        "ascend": AscendBackend,
     }
 
     @torch.no_grad()
     def __init__(
         self,
         model: str | torch.nn.Module = "yolo26n.pt",
-        device: torch.device = torch.device("cpu"),
+        device: torch.device | None = None,
         dnn: bool = False,
         data: str | Path | None = None,
         fp16: bool = False,
@@ -190,6 +193,8 @@ class AutoBackend(nn.Module):
             verbose (bool): Enable verbose logging.
         """
         super().__init__()
+        device = device or torch.device("cpu")
+
         # WeDetect dual OV: *_vision.{onnx|engine} + sibling *_language.* (narrow gate; other formats untouched)
         if not isinstance(model, nn.Module) and is_wedetect_dual_weight(model):
             if (
@@ -278,7 +283,6 @@ class AutoBackend(nn.Module):
         self,
         im: torch.Tensor,
         augment: bool = False,
-        visualize: bool = False,
         embed: list | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -287,7 +291,6 @@ class AutoBackend(nn.Module):
         Args:
             im (torch.Tensor): The image tensor to perform inference on.
             augment (bool): Whether to perform data augmentation during inference.
-            visualize (bool): Whether to visualize the output predictions.
             embed (list, optional): A list of layer indices to return embeddings from.
             **kwargs (Any): Additional keyword arguments for model configuration.
 
@@ -302,7 +305,7 @@ class AutoBackend(nn.Module):
         # Build forward kwargs based on backend type
         forward_kwargs = {}
         if self.format == "pt":
-            forward_kwargs = {"augment": augment, "visualize": visualize, "embed": embed, **kwargs}
+            forward_kwargs = {"augment": augment, "embed": embed, **kwargs}
 
         y = self.backend.forward(im, **forward_kwargs)
 
@@ -326,11 +329,12 @@ class AutoBackend(nn.Module):
         x = torch.tensor(x) if isinstance(x, np.ndarray) else x
         return x.to(self.device) if isinstance(x, torch.Tensor) else x
 
-    def warmup(self, imgsz: tuple[int, int, int, int] = (1, 3, 640, 640)) -> None:
-        """Warm up the model by running forward pass(es) with a dummy input.
+    def warmup(self, imgsz: tuple[int, int, int, int] = (1, 3, 640, 640), im: torch.Tensor | None = None) -> None:
+        """Warm up the model by running forward pass(es).
 
         Args:
             imgsz (tuple[int, int, int, int]): Dummy input shape in (batch, channels, height, width) format.
+            im (torch.Tensor, optional): Input tensor to reuse instead of allocating a dummy.
         """
         from ultralytics.utils.nms import non_max_suppression
 
@@ -339,11 +343,15 @@ class AutoBackend(nn.Module):
         if self.format in {"pt", "torchscript", "onnx", "engine", "saved_model", "pb", "triton"} and (
             self.device.type != "cpu" or self.format == "triton"
         ):
-            im = torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)  # input
+            im = (
+                im
+                if im is not None
+                else torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)
+            )
             for _ in range(2 if self.format == "torchscript" else 1):
                 self.forward(im)  # warmup model
                 warmup_boxes = torch.rand(1, 84, 16, device=self.device)  # 16 boxes works best empirically
-                warmup_boxes[:, :4] *= imgsz[-1]
+                warmup_boxes[:, :4] *= im.shape[-1]
                 non_max_suppression(warmup_boxes)  # warmup NMS
 
     @staticmethod
@@ -406,7 +414,7 @@ class AutoBackend(nn.Module):
         Returns:
             (AutoBackend): The model instance with the function applied and updated attributes.
         """
-        self = super()._apply(fn)
+        super()._apply(fn)
         if hasattr(self.backend, "model") and isinstance(self.backend.model, nn.Module):
             self.backend.model._apply(fn)
             self.backend.device = next(self.backend.model.parameters()).device  # update device after move

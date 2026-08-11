@@ -58,6 +58,12 @@ TensorRT offers several deployment options, and each option balances ease of int
 
 - **NVIDIA Triton Inference Server**: An option that supports models from various frameworks. Particularly suited for cloud or edge inference, it provides features like concurrent model execution and model analysis.
 
+## Supported Tasks
+
+TensorRT export supports all seven Ultralytics tasks. Semantic segmentation and depth estimation are available only with YOLO26, the only family that ships those heads.
+
+{% include "macros/supported-tasks.md" %}
+
 ## Exporting YOLO26 Models to TensorRT
 
 You can improve execution efficiency and optimize performance by converting YOLO26 models to TensorRT format.
@@ -155,6 +161,7 @@ The TensorRT format supports the [Export](../modes/export.md), [Predict](../mode
 | `quantize`  | `int` or `str`    | `None`         | Quantization precision: `16` (FP16) or `8` (INT8/PTQ; needs calibration `data`/`fraction`); `32`/unset is FP32. Replaces the deprecated `half`/`int8` flags.                                                                                                     |
 | `dynamic`   | `bool`            | `False`        | Allows dynamic input sizes, enhancing flexibility in handling varying image dimensions.                                                                                                                                                                          |
 | `simplify`  | `bool`            | `True`         | Simplifies the model graph with `onnxslim`, potentially improving performance and compatibility.                                                                                                                                                                 |
+| `opset`     | `int`             | `None`         | Specifies the ONNX opset version for the intermediate ONNX graph. If not set, uses the latest supported version.                                                                                                                                                 |
 | `workspace` | `float` or `None` | `None`         | Sets the maximum workspace size in GiB for TensorRT optimizations, balancing memory usage and performance; use `None` for auto-allocation by TensorRT up to device maximum.                                                                                      |
 | `nms`       | `bool`            | `False`        | Adds Non-Maximum Suppression (NMS), essential for accurate and efficient detection post-processing.                                                                                                                                                              |
 | `batch`     | `int`             | `1`            | Specifies export model batch inference size or the max number of images the exported model will process concurrently in `predict` mode.                                                                                                                          |

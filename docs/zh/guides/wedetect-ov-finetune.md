@@ -372,16 +372,16 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 
 | 文件                           | 位置                                                                                    | 说明                                                                                         |
 | ------------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `pseudo_labels.cache`        | 数据集`path` 根目录                                                                   | 仅教师伪标；`cls` 已 remap 为 `nc_gt+k`；归一化 xywh；含 `version`/`hash`/`labels` |
+| `pseudo_labels-{model}.cache` | 数据集`path` 根目录                                                                   | 仅教师伪标（如 `sam3.pt` → `pseudo_labels-sam3.cache`）；`cls` 已 remap 为 `nc_gt+k`；归一化 xywh；含 `version`/`hash`/`labels` |
 | `labels_pseudo_merged.cache` | 与 YOLO 约定一致：`…/labels_pseudo_merged.cache`（`labels_pseudo_merged/` 目录旁） | GT+伪标合并；格式同`YOLODataset.cache_labels`（`DATASET_CACHE_VERSION=1.0.3`）           |
 | `pseudo_label_meta.json`     | 数据集`path` 根目录                                                                   | 幂等元信息：词表 hash、`kept_src_ids`、`conf`、两份 cache 路径/hash、`nc_gt`/`nc` 等 |
 | `<stem>_train.json`          | 与 yaml`class_texts` 同目录                                                           | 合并词表（GT + 伪标中文 + leftover 负类）；**不覆盖**原 JSON；训练/微调优先用此文件    |
 
-`get_labels`：伪标合并 cache 用**相对路径可移植 hash**（`merged_cache_hash` / `path_mode=rel_v1`）校验；命中后把 `labels[].im_file` **remap** 到本机当前绝对路径。若合并 cache 失效但 `pseudo_labels.cache` 仍在，则调用 `rebuild_merged_pseudo_cache` 从伪标 cache + GT **重合并**（不跑教师、不扫空 txt）；两者皆无则报错提示重新开启数据集侧 `pseudo_label`。
+`get_labels`：伪标合并 cache 用**相对路径可移植 hash**（`merged_cache_hash` / `path_mode=rel_v1`）校验；命中后把 `labels[].im_file` **remap** 到本机当前绝对路径。若合并 cache 失效但 `pseudo_labels-{model}.cache` 仍在（或 meta 中记录的路径仍可读），则调用 `rebuild_merged_pseudo_cache` 从伪标 cache + GT **重合并**（不跑教师、不扫空 txt）；两者皆无则报错提示重新开启数据集侧 `pseudo_label`。
 
-**增量写入 / 断点续跑：** 每处理 `PSEUDO_FLUSH_EVERY`（默认 50）张图后原子写入 `pseudo_labels.cache`；结束时强制 flush。YOLO/WeDetect 将路径写入临时 `.txt` 再 `predict`（**禁止**把路径 list 直接传入，否则 Ultralytics 会 `LoadPilAndNumpy` 把整表当成一个超大 batch）。`rect=False` 固定 640 方图 letterbox，显存更稳。
+**增量写入 / 断点续跑：** 每处理 `PSEUDO_FLUSH_EVERY`（默认 50）张图后原子写入 `pseudo_labels-{model_stem}.cache`；结束时强制 flush。YOLO/WeDetect 将路径写入临时 `.txt` 再 `predict`（**禁止**把路径 list 直接传入，否则 Ultralytics 会 `LoadPilAndNumpy` 把整表当成一个超大 batch）。`rect=False` 固定 640 方图 letterbox，显存更稳。
 
-**跨机复用：** 只要数据集相对布局不变（相对 `path` 的 `images/`、`labels/` 等），绝对挂载点不同也可直接拷贝 `pseudo_labels.cache` / `labels_pseudo_merged.cache` / `pseudo_label_meta.json`。hash 基于相对路径键 + 文件 size，模型/词表配置用 basename；加载时 remap `im_file`。旧版绝对路径 hash 的 cache 会 miss 一次并自动按新逻辑重建。
+**跨机复用：** 只要数据集相对布局不变（相对 `path` 的 `images/`、`labels/` 等），绝对挂载点不同也可直接拷贝 `pseudo_labels-*.cache` / `labels_pseudo_merged.cache` / `pseudo_label_meta.json`。hash 基于相对路径键 + 文件 size，模型/词表配置用 basename；加载时 remap `im_file`。旧版绝对路径 hash 的 cache 会 miss 一次并自动按新逻辑重建。
 
 #### 配置项（优先写在数据集 YAML）
 
@@ -425,7 +425,7 @@ pseudo_label_mem_fraction: 0.85
 冲突处理 + 词表排序
   → 写出 <stem>_train.json（原 class_texts 不动）
   → 教师推理（动态 batch / prompt chunk）
-  → 写 pseudo_labels.cache
+  → 写 pseudo_labels-{model_stem}.cache
   → 加载 GT（优先 labels.cache，否则扫 labels/*.txt）
   → 合并写 labels_pseudo_merged.cache
   → 更新 data: labels_dir / nc / names / class_texts→*_train.json
@@ -525,7 +525,15 @@ results = model.predict(
 
 ## 8. 导出 ONNX / TensorRT（动态开放词汇）
 
-### 8.1 Dual ONNX（推荐）
+导出后仍要 `set_classes` 换提示词时，**必须用 dual**（语言塔 + 视觉塔）。吞吐大致：
+
+`engine + nms=True` ≫ `torchscript + nms=True` ≫ `onnx + nms=True` ≫ 无 NMS / Python 后处理。
+
+- **最快且开放词汇**：`format="engine", export_mode="dual", nms=True`（需 GPU / TensorRT）
+- **无 TRT 时的次优**：`format="torchscript", export_mode="dual", nms=True`（vision 图内 `batched_nms` → `(B,max_det,6)`）
+- **跨平台便携**：`format="onnx", export_mode="dual"`（可选 `nms=True` 用 ORT 原生 NMS）
+
+### 8.1 Dual ONNX（便携）
 
 语言塔只算一次，视觉塔复用 `txt_feats`；`num_classes` / `seq_len` 为动态轴，导出后可换任意提示词。
 
@@ -545,6 +553,40 @@ paths = model.export(
 #   *_vision.onnx
 #   *_language.onnx
 print(paths)
+```
+
+**可选原生 NMS（ONNX Runtime 可跑）**：`nms=True` 时在 vision（或 whole）图上追加 ONNX 算子 `NonMaxSuppression`（**不是** TensorRT 的 `EfficientNMS_TRT`），输出 `bboxes` / `scores` / `nms_indices`，可用 ORT 直接推理；官方 `WeDetect("..._vision.onnx").set_classes(...).predict(...)` 同样支持。
+
+```python
+model.export(
+    format="onnx",
+    export_mode="dual",
+    nms=True,
+    max_det=300,
+    conf=0.25,
+    iou=0.45,
+    max_classes=80,
+    imgsz=640,
+)
+```
+
+### 8.1.1 Dual TorchScript（开放词汇 + 可选图内 NMS）
+
+双塔 TorchScript：语言塔编码任意提示词，视觉塔消费 `txt_feats`。`nms=True` 时在 vision 内用 `batched_nms` 直接输出 `(B, max_det, 6)`（比回传 indices 再 Python gather 更快）。**绝对吞吐仍优先 TensorRT `format=engine, nms=True`。**
+
+```python
+model.export(
+    format="torchscript",
+    export_mode="dual",
+    nms=True,            # 推荐：图内 NMS
+    max_classes=80,
+    max_det=300,
+    conf=0.25,
+    iou=0.45,
+    imgsz=640,
+)
+# 产出: *_vision.torchscript + *_language.torchscript
+WeDetect("..._vision.torchscript").set_classes(["人", "车"]).predict("img.jpg")
 ```
 
 ### 8.2 Dual TensorRT（engine）
@@ -645,7 +687,7 @@ python examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py \
 - [ ] 图像与 `labels/*.txt` 一一对应，`class_id` 与 `names`/`class_texts` 前 `nc` 行对齐
 - [ ] `class_texts` JSON 长度 **≥ `nc`**（多出行作 OV 负类）；近义可同行，**属性勿与基类同行**
 - [ ] 已安装 `transformers` + `sentencepiece`；仓库根无空的 `xlm-roberta-base/`
-- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）
+- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels-{model}.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）
 - [ ] `cfg=wedetect_finetune.yaml` 且 `freeze_text_encoder=False`，日志中出现文本塔 register / 独立 param group
 - [ ] `best.pt` 完整（体积与同系列完整权重同量级，约数 GB）且含非空 `text_model_weights`
 - [ ] `model.val(...)` / 混数多集验证指标合理
@@ -683,7 +725,7 @@ YOLO 微调若只把「红色车」写进「车」的同义组，会学成同义
 确认 `pseudo_label_batch=0`（自动）。YOLO/WeDetect 会按空闲显存抬图像 batch；SAM3 只能逐图，但会加大 prompt chunk。也可手动设 `pseudo_label_batch` 与 `pseudo_label_mem_fraction`。
 
 **Q: 伪标签后找不到每图 txt？**
-正常。当前实现只写 `pseudo_labels.cache` 与 `labels_pseudo_merged.cache`，不再落盘 `labels_pseudo_merged/*.txt`。
+正常。当前实现只写 `pseudo_labels-{model_stem}.cache` 与 `labels_pseudo_merged.cache`，不再落盘 `labels_pseudo_merged/*.txt`。
 
 **Q: 伪标 cache 换机器后是否要重跑教师？**
 不必，只要相对 `path` 的目录布局与文件 size 不变。当前 hash 为可移植相对路径（`path_mode=rel_v1`）；加载时会把 `im_file` remap 到本机路径。旧绝对路径 hash 的 cache 会 miss 一次并自动重建。

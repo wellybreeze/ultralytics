@@ -804,13 +804,18 @@ class Exporter:
             )
             model.clip_model = None  # openvino int8 export error: https://github.com/ultralytics/ultralytics/pull/18445
 
-        # WeDetect dual-tower dynamic open-vocabulary ONNX / TensorRT export
-        if isinstance(model, WeDetectModel) and fmt in {"onnx", "engine"}:
+        # WeDetect dual-tower dynamic open-vocabulary ONNX / TensorRT / TorchScript export
+        if isinstance(model, WeDetectModel) and fmt in {"onnx", "engine", "torchscript"}:
             export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
             if fmt == "engine" and export_mode != "dual":
                 raise ValueError(
                     "WeDetect TensorRT export only supports export_mode='dual' "
                     f"(got '{export_mode}'). Use format='onnx' for whole graphs."
+                )
+            if fmt == "torchscript" and export_mode != "dual":
+                raise ValueError(
+                    "WeDetect TorchScript export only supports export_mode='dual' "
+                    f"(got '{export_mode}') so open-vocabulary prompts stay swappable."
                 )
             if export_mode in {"dual", "whole"}:
                 self.file = Path(
@@ -821,7 +826,12 @@ class Exporter:
                 self.imgsz = check_imgsz(self.args.imgsz, stride=model.stride, min_dim=2)
                 self.model = model
                 self.run_callbacks("on_export_start")
-                f = self.export_wedetect_engine() if fmt == "engine" else self.export_wedetect_onnx()
+                if fmt == "engine":
+                    f = self.export_wedetect_engine()
+                elif fmt == "torchscript":
+                    f = self.export_wedetect_torchscript()
+                else:
+                    f = self.export_wedetect_onnx()
                 self.run_callbacks("on_export_end")
                 return str(f)
 
@@ -1193,6 +1203,8 @@ class Exporter:
         opset = max(int(opset), 17)  # align with original WeDetect deploy default
         export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
         imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        if self.args.nms:
+            self.args.conf = self.args.conf or 0.25
         paths = export_wedetect_onnx(
             self.model,
             self.file,
@@ -1201,6 +1213,35 @@ class Exporter:
             opset=opset,
             simplify=bool(self.args.simplify),
             device=self.device,
+            prefix=prefix,
+            nms=bool(self.args.nms),
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf or 0.25),
+            iou=float(self.args.iou),
+            max_classes=int(self.args.max_classes),
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
+
+    @try_export
+    def export_wedetect_torchscript(self, prefix=colorstr("WeDetect TorchScript:")):
+        """Export WeDetect dual TorchScript towers (language + vision, optional in-graph NMS)."""
+        from ultralytics.utils.export.wedetect import export_wedetect_torchscript
+
+        nms = bool(self.args.nms)
+        if nms:
+            self.args.conf = self.args.conf or 0.25
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        paths = export_wedetect_torchscript(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            device=self.device,
+            nms=nms,
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf or 0.25),
+            iou=float(self.args.iou),
+            max_classes=int(self.args.max_classes),
             prefix=prefix,
         )
         LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")

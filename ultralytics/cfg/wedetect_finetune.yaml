@@ -39,7 +39,8 @@
 #   Keys here / CLI are fallbacks when a dataset omits them (dataset YAML wins if present).
 #   pseudo_label=True
 #   pseudo_label_model=sam3.pt|yolo11x.pt|wedetect_base.pt
-#   Writes pseudo_labels.cache + labels_pseudo_merged.cache; class-level dedup only.
+#   pseudo_label_imgsz=640  # teacher size; independent of train imgsz
+#   Writes pseudo_labels-{model_stem}.cache + labels_pseudo_merged.cache; class-level dedup only.
 
 task: detect # (str) YOLO task, i.e. detect, segment, semantic, classify, pose, obb
 mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmark
@@ -93,6 +94,7 @@ pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_
 pseudo_label_conf: 0.25 # (float) teacher conf fallback
 pseudo_label_batch: 0 # (int) batch fallback; 0=auto from free VRAM
 pseudo_label_mem_fraction: 0.85 # (float) free-VRAM fraction fallback
+pseudo_label_imgsz: 640 # (int) teacher inference size; independent of train imgsz
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)

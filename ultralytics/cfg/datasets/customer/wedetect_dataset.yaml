@@ -27,6 +27,7 @@ pseudo_label: true
 pseudo_label_model: yolo26x.pt # 或 yolo26x.pt / wedetect_*.pt / sam3.pt
 # pseudo_label_classes: ""              # 空 = COCO names
 # pseudo_label_class_texts: ""          # 空 = coco_zh_class_texts.json
-pseudo_label_conf: 0.2                 # 伪标签置信度   
-pseudo_label_batch: 0                   # 0=按空闲显存自动，伪标签批次大小    
+pseudo_label_conf: 0.2                 # 伪标签置信度
+pseudo_label_batch: 0                   # 0=按空闲显存自动，伪标签批次大小
 pseudo_label_mem_fraction: 0.8         # 伪标签推理自动batch内存占用比例
+# pseudo_label_imgsz: 640              # teacher 推理分辨率；默认 640，与训练 imgsz 无关

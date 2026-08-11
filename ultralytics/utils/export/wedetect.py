@@ -132,6 +132,63 @@ class WeDetectWholeExport(nn.Module):
         return self.vision(image, txt_feats)
 
 
+class WeDetectVisionNMSExport(nn.Module):
+    """Vision tower + TorchScript-friendly class-aware NMS → ``(B, max_det, 6)``.
+
+    Uses ``torchvision.ops.batched_nms`` (faster than Python gather of ONNX indices).
+    Trace with ``txt_feats`` padded to ``max_classes`` so the class axis is stable while
+    open-vocabulary prompts remain swappable via the separate language tower.
+    """
+
+    def __init__(
+        self,
+        vision: WeDetectVisionExport,
+        *,
+        max_det: int = 300,
+        conf: float = 0.25,
+        iou: float = 0.45,
+        max_classes: int = 80,
+    ):
+        super().__init__()
+        self.vision = vision
+        self.max_det = int(max_det)
+        self.conf = float(conf)
+        self.iou = float(iou)
+        self.max_classes = int(max_classes)
+
+    def forward(self, image: torch.Tensor, txt_feats: torch.Tensor) -> torch.Tensor:
+        """Run vision decode + NMS; return xyxy/conf/cls padded to ``max_det``."""
+        from torchvision.ops import batched_nms
+
+        bboxes, scores = self.vision(image, txt_feats)  # B,N,4 xyxy ; B,N,K
+        # Pad/truncate class axis to the traced max_classes ceiling
+        k = scores.shape[-1]
+        if k < self.max_classes:
+            scores = F.pad(scores, (0, self.max_classes - k))
+        elif k > self.max_classes:
+            scores = scores[..., : self.max_classes]
+        b, n, nc = scores.shape
+        out = image.new_zeros(b, self.max_det, 6)
+        for i in range(b):
+            boxes = bboxes[i]
+            sc = scores[i]
+            boxes_exp = boxes.unsqueeze(1).expand(n, nc, 4).reshape(-1, 4)
+            scores_flat = sc.reshape(-1)
+            # cumsum on sc-backed ones keeps class ids on the runtime device (arange would bake
+            # device("cpu") into the TorchScript graph when exported on CPU).
+            cls_ids = sc.new_ones(n, nc).cumsum(1).long().reshape(-1) - 1
+            scores_nms = scores_flat.clone()
+            scores_nms[scores_flat <= self.conf] = 0
+            keep = batched_nms(boxes_exp, scores_nms, cls_ids, self.iou)
+            keep = keep[scores_nms[keep] > 0][: self.max_det]
+            num = keep.numel()
+            if num > 0:
+                out[i, :num] = torch.cat(
+                    [boxes_exp[keep], scores_flat[keep].unsqueeze(1), cls_ids[keep].unsqueeze(1).to(out.dtype)], 1
+                )
+        return out
+
+
 def _prepare_text_encoder(model):
     """Ensure WeDetectModel has a loaded text encoder with synced weights."""
     from copy import deepcopy
@@ -176,6 +233,12 @@ def export_wedetect_onnx(
     simplify: bool = False,
     device: str | torch.device = "cpu",
     prefix: str = "",
+    *,
+    nms: bool = False,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    max_classes: int = 80,
 ) -> list[str]:
     """Export WeDetect to dual or whole ONNX graphs.
 
@@ -188,6 +251,10 @@ def export_wedetect_onnx(
         simplify: Whether to slim graphs with onnxslim when available.
         device: Export device.
         prefix: Log prefix.
+        nms: If True, append ONNX-native ``NonMaxSuppression`` (ORT-runnable) to the
+            vision/whole graph. Distinct from TensorRT ``EfficientNMS_TRT``.
+        max_det / conf / iou: Native NMS parameters when ``nms=True``.
+        max_classes: Stored in metadata (prompt ceiling for DualBackend padding).
 
     Returns:
         (list[str]): Paths of exported ONNX files (vision first for dual).
@@ -297,7 +364,126 @@ def export_wedetect_onnx(
             model_onnx.ir_version = 10
         onnx.save(model_onnx, path)
 
+    if nms:
+        # ORT-native NMS on vision (dual) or whole graph — not EfficientNMS_TRT
+        target = exported[0]
+        append_wedetect_onnx_nms(
+            target,
+            output_file=target,
+            max_det=max_det,
+            conf=conf,
+            iou=iou,
+            max_classes=max_classes,
+            prefix=colorstr("WeDetect ONNX-NMS:"),
+        )
+
     return exported
+
+
+def append_wedetect_onnx_nms(
+    onnx_file: str | Path,
+    output_file: str | Path | None = None,
+    *,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    max_classes: int = 80,
+    prefix: str = "",
+) -> str:
+    """Append ONNX-native ``NonMaxSuppression`` to a WeDetect vision/whole graph.
+
+    Runnable in ONNX Runtime (unlike ``EfficientNMS_TRT``). Keeps decoded ``bboxes``
+    (xyxy) and ``scores`` as outputs and adds ``nms_indices`` ``[M,3]`` =
+    ``[batch, class, box]`` for DualBackend gather packing.
+
+    Args:
+        onnx_file: Path to ``*_vision.onnx`` or ``*_whole.onnx``.
+        output_file: Destination path (default: overwrite ``onnx_file``).
+        max_det: ``max_output_boxes_per_class`` for the NMS node (then packed to
+            ``max_det`` total detections in DualBackend).
+        conf / iou: Score / IoU thresholds.
+        max_classes: Written to metadata for DualBackend.
+        prefix: Log prefix.
+
+    Returns:
+        (str): Path to the written ONNX file.
+    """
+    check_requirements("onnx_graphsurgeon>=0.3.26")
+    import numpy as np
+    import onnx
+    import onnx_graphsurgeon as gs
+
+    prefix = prefix or colorstr("WeDetect ONNX-NMS:")
+    onnx_file = Path(onnx_file)
+    output_file = Path(output_file) if output_file is not None else onnx_file
+
+    LOGGER.info(f"{prefix} appending NonMaxSuppression to {onnx_file} -> {output_file}")
+    graph = gs.import_onnx(onnx.load(str(onnx_file)))
+    outs = list(graph.outputs)
+    if len(outs) < 2:
+        raise ValueError(f"WeDetect ONNX must have bboxes+scores outputs, got {len(outs)}")
+    by_name = {o.name: o for o in outs}
+    boxes = by_name.get("bboxes", outs[0])  # [B,N,4] xyxy
+    scores = by_name.get("scores", outs[1])  # [B,N,K]
+
+    # scores [B,N,K] -> [B,K,N] for ONNX NonMaxSuppression
+    scores_bkn = gs.Variable(name="scores_bkn", dtype=np.float32)
+    graph.layer(op="Transpose", name="scores_BNK_to_BKN", inputs=[scores], outputs=[scores_bkn], attrs={"perm": [0, 2, 1]})
+
+    # boxes xyxy -> yxyx (center_point_box=0 TensorFlow corner format)
+    split_sizes = gs.Constant("nms_box_split", np.array([1, 1, 1, 1], dtype=np.int64))
+    x1 = gs.Variable("nms_x1", dtype=np.float32)
+    y1 = gs.Variable("nms_y1", dtype=np.float32)
+    x2 = gs.Variable("nms_x2", dtype=np.float32)
+    y2 = gs.Variable("nms_y2", dtype=np.float32)
+    graph.layer(
+        op="Split",
+        name="split_xyxy",
+        inputs=[boxes, split_sizes],
+        outputs=[x1, y1, x2, y2],
+        attrs={"axis": 2},
+    )
+    boxes_yxyx = gs.Variable(name="boxes_yxyx", dtype=np.float32)
+    graph.layer(op="Concat", name="concat_yxyx", inputs=[y1, x1, y2, x2], outputs=[boxes_yxyx], attrs={"axis": 2})
+
+    max_out = gs.Constant("max_output_boxes_per_class", np.array([int(max_det)], dtype=np.int64))
+    iou_t = gs.Constant("iou_threshold", np.array([float(iou)], dtype=np.float32))
+    score_t = gs.Constant("score_threshold", np.array([float(conf)], dtype=np.float32))
+    indices = gs.Variable(name="nms_indices", dtype=np.int64, shape=["num_selected", 3])
+    graph.layer(
+        op="NonMaxSuppression",
+        name="NonMaxSuppression",
+        inputs=[boxes_yxyx, scores_bkn, max_out, iou_t, score_t],
+        outputs=[indices],
+        attrs={"center_point_box": 0},
+    )
+    # Keep original xyxy boxes + scores for gather; indices drive DualBackend packing
+    graph.outputs = [boxes, scores, indices]
+    graph.cleanup().toposort()
+
+    model_onnx = gs.export_onnx(graph)
+    src = onnx.load(str(onnx_file))
+    meta = {p.key: p.value for p in src.metadata_props}
+    meta.update(
+        {
+            "end2end": "True",
+            "nms": "True",
+            "nms_format": "onnx_indices",
+            "max_det": str(int(max_det)),
+            "max_classes": str(int(max_classes)),
+            "conf": str(float(conf)),
+            "iou": str(float(iou)),
+        }
+    )
+    del model_onnx.metadata_props[:]
+    for k, v in meta.items():
+        prop = model_onnx.metadata_props.add()
+        prop.key, prop.value = k, str(v)
+    if getattr(model_onnx, "ir_version", 0) > 10:
+        model_onnx.ir_version = 10
+    onnx.save(model_onnx, str(output_file))
+    LOGGER.info(f"{prefix} saved {output_file}")
+    return str(output_file)
 
 
 def append_wedetect_efficient_nms(
@@ -386,6 +572,7 @@ def append_wedetect_efficient_nms(
         {
             "end2end": "True",
             "nms": "True",
+            "nms_format": "efficientnms",
             "max_det": str(int(max_det)),
             "max_classes": str(int(max_classes)),
             "conf": str(float(conf)),
@@ -749,3 +936,96 @@ def export_wedetect_engine(
         engines.append(str(eng))
     LOGGER.info(f"{prefix} exported {len(engines)} engine(s): {', '.join(engines)}")
     return engines
+
+
+def export_wedetect_torchscript(
+    model,
+    file: Path | str,
+    imgsz: int | tuple[int, int] = 640,
+    *,
+    device: str | torch.device = "cpu",
+    nms: bool = True,
+    max_det: int = 300,
+    conf: float = 0.25,
+    iou: float = 0.45,
+    max_classes: int = 80,
+    prefix: str = "",
+) -> list[str]:
+    """Export WeDetect dual TorchScript towers with optional in-graph NMS.
+
+    Dual layout keeps open-vocabulary prompts: language encodes ``set_classes`` text,
+    vision consumes ``txt_feats``. When ``nms=True`` (default for speed), vision emits
+    packed ``(B, max_det, 6)`` via ``batched_nms`` so predictors skip Python NMS.
+
+    Args:
+        model: ``WeDetectModel`` instance.
+        file: Source model path (stem used for output names).
+        imgsz: Square size or ``(h, w)``.
+        device: Export device.
+        nms: Bake class-aware NMS into the vision tower (recommended).
+        max_det / conf / iou: NMS parameters when ``nms=True``.
+        max_classes: Fixed class-axis ceiling for traced vision (pad prompts to this).
+        prefix: Log prefix.
+
+    Returns:
+        (list[str]): ``[vision.torchscript, language.torchscript]``.
+    """
+    import json
+
+    prefix = prefix or colorstr("WeDetect TorchScript:")
+    file = Path(file)
+    device = torch.device(device)
+    h, w = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz
+    embed = int(getattr(model.model[-1].cv3[0][-1], "out_channels", 768))
+    max_classes = max(1, int(max_classes))
+
+    prepared, text_encoder = _prepare_text_encoder(model)
+    prepared = prepared.to(device)
+    # Language must be traced on CPU: HF XLM-R embeds bake device("cpu") into the graph under
+    # jit.trace; running that module on CUDA later fails gather. Prompts are rare vs vision frames.
+    text_encoder = text_encoder.to("cpu")
+    vision = WeDetectVisionExport(prepared, imgsz=(h, w)).to(device).eval()
+    language = WeDetectLanguageExport(text_encoder).to("cpu").eval()
+    if nms:
+        vision = WeDetectVisionNMSExport(
+            vision, max_det=max_det, conf=conf, iou=iou, max_classes=max_classes
+        ).to(device).eval()
+
+    dummy_img = torch.zeros(1, 3, h, w, device=device)
+    # Non-zero text feats so NMS control-flow / batched_nms is recorded under jit.trace
+    n_txt = max_classes if nms else 8
+    dummy_txt = F.normalize(torch.randn(1, n_txt, embed, device=device), dim=-1)
+    input_ids, attention_mask = _dummy_tokens(text_encoder, num_classes=min(8, max_classes))
+
+    v_out = str(file.with_name(f"{file.stem}_vision.torchscript"))
+    l_out = str(file.with_name(f"{file.stem}_language.torchscript"))
+    meta = {
+        "task": "detect",
+        "export_mode": "dual",
+        "format": "torchscript",
+        "imgsz": f"{h},{w}",
+        "embed_dim": str(embed),
+        "text_model": getattr(model, "text_model_variant", "xlm-roberta:base"),
+        "stride": str(int(max(int(s) for s in (vision.vision if nms else vision).stride.tolist()))),
+        "max_classes": str(max_classes),
+        "end2end": str(bool(nms)),
+        "nms": str(bool(nms)),
+        "nms_format": "packed6" if nms else "",
+        "max_det": str(int(max_det)),
+        "conf": str(float(conf)),
+        "iou": str(float(iou)),
+        "language_device": "cpu",
+    }
+    extra = {"config.txt": json.dumps(meta)}
+
+    LOGGER.info(f"{prefix} tracing vision tower -> {v_out} (nms={nms})")
+    vis_ts = torch.jit.trace(vision, (dummy_img, dummy_txt), strict=False, check_trace=False)
+    vis_ts.save(v_out, _extra_files=extra)
+
+    LOGGER.info(f"{prefix} tracing language tower on CPU -> {l_out}")
+    lang_ts = torch.jit.trace(language, (input_ids, attention_mask), strict=False, check_trace=False)
+    lang_meta = {**meta, "end2end": "False", "nms": "False", "nms_format": ""}
+    lang_ts.save(l_out, _extra_files={"config.txt": json.dumps(lang_meta)})
+
+    LOGGER.info(f"{prefix} exported 2 file(s): {v_out}, {l_out}")
+    return [v_out, l_out]

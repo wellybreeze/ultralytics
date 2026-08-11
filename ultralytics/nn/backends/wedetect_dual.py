@@ -1,12 +1,12 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""WeDetect dual-tower ONNX / TensorRT inference backend.
+"""WeDetect dual-tower ONNX / TensorRT / TorchScript inference backend.
 
-Loads ``*_vision.{onnx|engine}`` + sibling ``*_language.{onnx|engine}``, keeps HF
+Loads ``*_vision.{onnx|engine|torchscript}`` + sibling ``*_language.*``, keeps HF
 tokenization in Python, and returns predictions for DetectionPredictor:
 
-- raw engines/ONNX: YOLO layout ``(B, 4+K, N)`` for Python NMS
-- EfficientNMS engines: end2end layout ``(B, max_det, 6)``
+- raw engines/ONNX/TS: YOLO layout ``(B, 4+K, N)`` for Python NMS
+- packed TorchScript NMS / ONNX-native NMS / EfficientNMS / TRT INMSLayer: ``(B, max_det, 6)``
 """
 
 from __future__ import annotations
@@ -24,13 +24,14 @@ from ultralytics.utils.checks import check_requirements, check_tensorrt, check_v
 from .base import BaseBackend
 
 Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
+_WEDETECT_DUAL_SUFFIXES = {".onnx", ".engine", ".torchscript"}
 
 
 def resolve_wedetect_dual_pair(weight: str | Path) -> tuple[Path, Path]:
     """Resolve vision weight path to (vision, language) sibling paths.
 
     Args:
-        weight (str | Path): Path ending with ``_vision.onnx`` or ``_vision.engine``.
+        weight (str | Path): Path ending with ``*_vision.{onnx,engine,torchscript}``.
 
     Returns:
         (tuple[Path, Path]): Absolute vision and language paths.
@@ -42,7 +43,7 @@ def resolve_wedetect_dual_pair(weight: str | Path) -> tuple[Path, Path]:
     vision = Path(weight).resolve()
     if not vision.stem.endswith("_vision"):
         raise ValueError(
-            f"WeDetect dual weight must be named '*_vision.{{onnx,engine}}', got '{vision.name}'. "
+            f"WeDetect dual weight must be named '*_vision.{{onnx,engine,torchscript}}', got '{vision.name}'. "
             f"Export with export_mode='dual' first."
         )
     language = vision.with_name(vision.name.replace("_vision", "_language", 1))
@@ -61,12 +62,26 @@ def is_wedetect_dual_weight(weight: str | Path | torch.nn.Module) -> bool:
         vision = Path(weight)
     except TypeError:
         return False
-    if vision.suffix not in {".onnx", ".engine"}:
+    if vision.suffix not in _WEDETECT_DUAL_SUFFIXES:
         return False
     if not vision.stem.endswith("_vision"):
         return False
     language = vision.with_name(vision.name.replace("_vision", "_language", 1))
     return vision.is_file() and language.is_file()
+
+
+def _read_torchscript_metadata(path: Path) -> dict:
+    """Read JSON ``config.txt`` embedded in a TorchScript archive."""
+    try:
+        import torchvision  # noqa: F401
+
+        extra = {"config.txt": ""}
+        torch.jit.load(str(path), _extra_files=extra, map_location="cpu")
+        if extra.get("config.txt"):
+            return json.loads(extra["config.txt"])
+    except Exception:
+        pass
+    return {}
 
 
 def _read_onnx_metadata(path: Path) -> dict:
@@ -293,11 +308,20 @@ class WeDetectDualBackend(BaseBackend):
     def load_model(self, weight: str | Path) -> None:
         """Load vision + language towers and prepare the HF tokenizer."""
         self.vision_path, self.language_path = resolve_wedetect_dual_pair(weight)
-        self.format = "engine" if self.vision_path.suffix == ".engine" else "onnx"
+        suf = self.vision_path.suffix.lower()
+        self.format = {".engine": "engine", ".torchscript": "torchscript"}.get(suf, "onnx")
         LOGGER.info(f"Loading WeDetect dual {self.format}: vision={self.vision_path.name}, language={self.language_path.name}")
 
+        self.lang_session = None
+        self.vis_session = None
+        self.lang_tower = None
+        self.vis_tower = None
+        self.lang_module = None
+        self.vis_module = None
         if self.format == "onnx":
             self._load_onnx()
+        elif self.format == "torchscript":
+            self._load_torchscript()
         else:
             if self.device.type == "cpu":
                 self.device = torch.device("cuda:0")
@@ -324,10 +348,13 @@ class WeDetectDualBackend(BaseBackend):
         # LetterBox does not use min-rect (which would break fixed 640x640 ONNX/TRT vision inputs).
         self.dynamic = False
         self.end2end = _as_bool(meta.get("end2end", False)) or _as_bool(meta.get("nms", False))
-        if self.end2end and self.format == "onnx":
+        self.nms_format = str(meta.get("nms_format", "") or "").lower()
+        if self.end2end and self.format == "onnx" and self.nms_format not in {"onnx_indices", "indices"}:
+            # EfficientNMS_TRT plugin graphs are not ORT-runnable
             raise RuntimeError(
                 "WeDetect EfficientNMS ONNX is TensorRT-only and cannot run in ONNX Runtime. "
-                "Export/load ``*_vision.engine`` (nms=True) instead."
+                "Re-export with format='onnx', nms=True (native NonMaxSuppression) or load "
+                "``*_vision.engine`` built with nms=True."
             )
         self.txt_feats: torch.Tensor | None = None
         self.nc_active = 0
@@ -345,18 +372,29 @@ class WeDetectDualBackend(BaseBackend):
             providers = [("CUDAExecutionProvider", {"device_id": self.device.index or 0}), "CPUExecutionProvider"]
         self.lang_session = ort.InferenceSession(str(self.language_path), providers=providers)
         self.vis_session = ort.InferenceSession(str(self.vision_path), providers=providers)
-        self.lang_tower = None
-        self.vis_tower = None
         meta = _read_onnx_metadata(self.vision_path) or _read_onnx_metadata(self.language_path)
         self.apply_metadata(_normalize_wedetect_metadata(meta))
         self.model = self.vis_session
+
+    def _load_torchscript(self) -> None:
+        """Load dual TorchScript towers (language + vision)."""
+        import torchvision  # noqa: F401 — required for batched_nms deserialization
+
+        # Language stays on CPU: traced HF graphs hardcode device("cpu") for embedding gathers.
+        self.lang_module = torch.jit.load(str(self.language_path), map_location="cpu")
+        self.vis_module = torch.jit.load(str(self.vision_path), map_location=self.device)
+        self.lang_module.eval()
+        self.vis_module.eval()
+        if self.fp16 and self.device.type != "cpu":
+            self.vis_module.half()
+        meta = _read_torchscript_metadata(self.vision_path) or _read_torchscript_metadata(self.language_path)
+        self.apply_metadata(_normalize_wedetect_metadata(meta))
+        self.model = self.vis_module
 
     def _load_engine(self) -> None:
         """Create TensorRT towers for language and vision."""
         self.lang_tower = _TRTTower(self.language_path, self.device)
         self.vis_tower = _TRTTower(self.vision_path, self.device)
-        self.lang_session = None
-        self.vis_session = None
         self.fp16 = bool(self.vis_tower.fp16 or self.lang_tower.fp16)
         meta = _read_engine_metadata(self.vision_path) or _read_engine_metadata(self.language_path) or {}
         self.apply_metadata(_normalize_wedetect_metadata(meta))
@@ -407,6 +445,10 @@ class WeDetectDualBackend(BaseBackend):
                 },
             )[0]
             self.txt_feats = torch.as_tensor(feats, dtype=torch.float32, device=self.device)
+        elif self.format == "torchscript":
+            with torch.inference_mode():
+                feats = self.lang_module(input_ids.cpu(), attention_mask.cpu())
+            self.txt_feats = feats.float().to(self.device)
         else:
             out = self.lang_tower.run(
                 {
@@ -420,8 +462,13 @@ class WeDetectDualBackend(BaseBackend):
         if self.txt_feats.ndim == 2:
             self.txt_feats = self.txt_feats.unsqueeze(0)
 
-        # EfficientNMS vision engines lock txt_feats to max_classes; pad unused slots with zeros.
-        if self.end2end and self.txt_feats.shape[1] < self.max_classes:
+        # EfficientNMS / TorchScript packed NMS / fixed-profile engines lock txt_feats to max_classes.
+        # ORT-native onnx_indices keeps a dynamic class axis — padding is unnecessary.
+        if (
+            self.end2end
+            and self.nms_format not in {"onnx_indices"}
+            and self.txt_feats.shape[1] < self.max_classes
+        ):
             pad = torch.zeros(
                 self.txt_feats.shape[0],
                 self.max_classes - self.txt_feats.shape[1],
@@ -456,9 +503,17 @@ class WeDetectDualBackend(BaseBackend):
         if self.format == "onnx":
             image = im.detach().float().cpu().numpy()
             feats = txt.detach().float().cpu().numpy()
-            bboxes, scores = self.vis_session.run(None, {"image": image, "txt_feats": feats})
-            bboxes = torch.as_tensor(bboxes, dtype=torch.float32, device=self.device)
-            scores = torch.as_tensor(scores, dtype=torch.float32, device=self.device)
+            outs = self.vis_session.run(None, {"image": image, "txt_feats": feats})
+            bboxes = torch.as_tensor(outs[0], dtype=torch.float32, device=self.device)
+            scores = torch.as_tensor(outs[1], dtype=torch.float32, device=self.device)
+        elif self.format == "torchscript":
+            if self.fp16 and self.device.type != "cpu":
+                im, txt = im.half(), txt.half()
+            else:
+                im, txt = im.float(), txt.float()
+            with torch.inference_mode():
+                bboxes, scores = self.vis_module(im.to(self.device), txt.to(self.device))
+            bboxes, scores = bboxes.float(), scores.float()
         else:
             if self.fp16:
                 im = im.half()
@@ -479,12 +534,39 @@ class WeDetectDualBackend(BaseBackend):
         return torch.cat([xywh, scores], dim=-1).permute(0, 2, 1).contiguous()
 
     def _forward_e2e(self, im: torch.Tensor, txt: torch.Tensor) -> torch.Tensor:
-        """Run NMS vision engine and pack ``(B, max_det, 6)`` xyxy+conf+cls.
+        """Run NMS vision tower and pack ``(B, max_det, 6)`` xyxy+conf+cls.
 
         Supports:
-        - ``EfficientNMS_TRT`` outputs: ``det_boxes`` / ``det_scores`` / ``det_classes`` / ``num_dets``
-        - TensorRT 11+ ``INMSLayer`` outputs: ``bboxes`` / ``scores`` / ``nms_indices`` / ``num_detections``
+        - TorchScript packed NMS: already ``(B, max_det, 6)``
+        - ONNX-native ``NonMaxSuppression``: ``bboxes`` / ``scores`` / ``nms_indices``
+        - ``EfficientNMS_TRT``: ``det_boxes`` / ``det_scores`` / ``det_classes`` / ``num_dets``
+        - TensorRT 11+ ``INMSLayer``: ``bboxes`` / ``scores`` / ``nms_indices`` / ``num_detections``
         """
+        if self.format == "torchscript":
+            if self.fp16 and self.device.type != "cpu":
+                im, txt = im.half(), txt.half()
+            else:
+                im, txt = im.float(), txt.float()
+            with torch.inference_mode():
+                packed = self.vis_module(im.to(self.device), txt.to(self.device))
+            packed = packed.float()
+            # Drop detections whose class id comes from padded unused prompt slots
+            if self.nc_active:
+                packed = packed.clone()
+                packed[packed[..., 5] >= self.nc_active] = 0
+            return packed
+
+        if self.format == "onnx":
+            image = im.detach().float().cpu().numpy()
+            feats = txt.detach().float().cpu().numpy()
+            names = [o.name for o in self.vis_session.get_outputs()]
+            vals = self.vis_session.run(names, {"image": image, "txt_feats": feats})
+            out = {n: torch.as_tensor(v, device=self.device) for n, v in zip(names, vals)}
+            # ORT selected_indices has no separate num_detections; use row count
+            if "num_detections" not in out and "nms_indices" in out:
+                out["num_detections"] = torch.tensor([out["nms_indices"].shape[0]], device=self.device)
+            return self._pack_indices_nms(out)
+
         if self.fp16:
             im = im.half()
             txt = txt.half()

@@ -63,6 +63,7 @@ pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_
 pseudo_label_conf: 0.25 # (float) teacher conf fallback
 pseudo_label_batch: 0 # (int) batch fallback; 0=auto from free VRAM
 pseudo_label_mem_fraction: 0.85 # (float) free-VRAM fraction fallback
+pseudo_label_imgsz: 640 # (int) teacher inference size; independent of train imgsz
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)

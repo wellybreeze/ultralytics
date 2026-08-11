@@ -290,7 +290,7 @@ class YOLODataset(BaseDataset):
             cache["labels"] = remap_label_im_files(list(cache.get("labels") or []), self.im_files, root)
         except (FileNotFoundError, AssertionError, AttributeError, ModuleNotFoundError):
             # WeDetect pseudo: merged labels live only in *.cache (no per-image txt). Rebuild from
-            # pseudo_labels.cache + GT instead of scanning empty labels_pseudo_merged/*.txt.
+            # pseudo_labels-{model}.cache + GT instead of scanning empty labels_pseudo_merged/*.txt.
             if is_pseudo_merged:
                 from ultralytics.models.yolo.wedetect.pseudo_label import rebuild_merged_pseudo_cache
 

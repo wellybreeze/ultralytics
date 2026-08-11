@@ -30,7 +30,6 @@ from ultralytics.utils.checks import check_file
 
 PSEUDO_LABELS_DIR = "labels_pseudo_merged"
 PSEUDO_META_NAME = "pseudo_label_meta.json"
-PSEUDO_ONLY_CACHE_NAME = "pseudo_labels.cache"
 # Keep in sync with ultralytics.data.dataset.DATASET_CACHE_VERSION
 DATASET_CACHE_VERSION = "1.0.3"
 DEFAULT_CONF = 0.25
@@ -50,6 +49,7 @@ PSEUDO_CFG_KEYS = (
     "pseudo_label_conf",
     "pseudo_label_batch",
     "pseudo_label_mem_fraction",
+    "pseudo_label_imgsz",
 )
 
 
@@ -91,13 +91,12 @@ def resolve_pseudo_cfg(data: dict | None, args: Any = None) -> dict[str, Any]:
         batch_i = 0
     mem_fraction = float(_pick("pseudo_label_mem_fraction", 0.85) or 0.85)
     mem_fraction = float(np.clip(mem_fraction, 0.1, 0.95))
-    imgsz = int(_from_args("imgsz", 640) or 640)
-    # imgsz is train-global; allow per-dataset override if present
-    if "imgsz" in data and data["imgsz"] is not None:
-        try:
-            imgsz = int(data["imgsz"])
-        except (TypeError, ValueError):
-            pass
+    imgsz_arg = _pick("pseudo_label_imgsz", 640)
+    try:
+        imgsz = int(imgsz_arg) if imgsz_arg is not None else 640
+    except (TypeError, ValueError):
+        imgsz = 640
+    imgsz = max(1, imgsz)
 
     return {
         "pseudo_label": enabled,
@@ -107,7 +106,7 @@ def resolve_pseudo_cfg(data: dict | None, args: Any = None) -> dict[str, Any]:
         "pseudo_label_conf": conf,
         "pseudo_label_batch": batch_i,  # <=0 means auto
         "pseudo_label_mem_fraction": mem_fraction,
-        "imgsz": imgsz,
+        "pseudo_label_imgsz": imgsz,
     }
 
 
@@ -855,6 +854,7 @@ def _meta_hash(
     kept_ids: list[int],
     conf: float,
     new_texts: list[list[str]],
+    imgsz: int,
     root: Path | None = None,
 ) -> str:
     payload = {
@@ -866,6 +866,7 @@ def _meta_hash(
         "class_texts_path": _rel_key(class_texts_path, root) if class_texts_path else "",
         "kept": kept_ids,
         "conf": float(conf),
+        "imgsz": int(imgsz),
         "new_texts": _texts_hash(new_texts),
         "dedup": "class_only",
         "pipeline": PSEUDO_CACHE_PIPELINE,
@@ -882,6 +883,7 @@ def _pseudo_only_hash(
     kept_ids: list[int],
     conf: float,
     nc_gt: int,
+    imgsz: int,
     root: Path | None = None,
 ) -> str:
     payload = {
@@ -892,6 +894,7 @@ def _pseudo_only_hash(
         "kept": kept_ids,
         "conf": float(conf),
         "nc_gt": int(nc_gt),
+        "imgsz": int(imgsz),
         "pipeline": PSEUDO_CACHE_PIPELINE,
         "path_mode": PORTABLE_HASH_MODE,
     }
@@ -909,13 +912,56 @@ def merged_cache_hash(im_files: list[str], root: Path | None = None) -> str:
     return portable_paths_hash([str(p) for p in label_files] + list(im_files), root)
 
 
-def pseudo_only_cache_path(data: dict, im_files: list[str] | None = None) -> Path:
-    """``pseudo_labels.cache`` under dataset root (fallback: parent of first image)."""
+def pseudo_only_cache_name(model: str | Path | None = None) -> str:
+    """Return ``pseudo_labels-{model_stem}.cache`` for a teacher weight path.
+
+    Example:
+        ``./pretrained_weights/sam3.pt`` → ``pseudo_labels-sam3.cache``
+    """
+    stem = Path(str(model or "sam3.pt")).stem.strip() or "sam3"
+    return f"pseudo_labels-{stem}.cache"
+
+
+def pseudo_only_cache_path(
+    data: dict,
+    im_files: list[str] | None = None,
+    model: str | Path | None = None,
+) -> Path:
+    """Teacher-only cache under dataset root (fallback: parent of first image).
+
+    Filename is ``pseudo_labels-{stem}.cache`` from ``model`` or ``data['pseudo_label_model']``.
+    """
+    name = pseudo_only_cache_name(model if model is not None else (data or {}).get("pseudo_label_model"))
     if data.get("path"):
-        return Path(data["path"]) / PSEUDO_ONLY_CACHE_NAME
+        return Path(data["path"]) / name
     if im_files:
-        return Path(im_files[0]).parents[1] / PSEUDO_ONLY_CACHE_NAME
-    return Path(PSEUDO_ONLY_CACHE_NAME)
+        return Path(im_files[0]).parents[1] / name
+    return Path(name)
+
+
+def _resolve_pseudo_only_cache_path(data: dict, im_files: list[str], root: Path | None = None) -> Path:
+    """Resolve teacher cache path for load/rebuild: meta basename → model stem → cfg model."""
+    root = root or _dataset_root(data, im_files)
+    meta_path = (root / PSEUDO_META_NAME) if root is not None else Path(PSEUDO_META_NAME)
+    model = (data or {}).get("pseudo_label_model")
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            model = meta.get("model") or model
+            cached = meta.get("pseudo_cache")
+            if cached:
+                # Prefer same basename under current dataset root (portable across machines)
+                by_name = (root / Path(str(cached)).name) if root is not None else Path(str(cached))
+                if by_name.exists():
+                    return by_name
+                abs_cached = Path(str(cached))
+                if abs_cached.exists():
+                    return abs_cached
+        except Exception:
+            pass
+    if model is None:
+        model = resolve_pseudo_cfg(data).get("pseudo_label_model")
+    return pseudo_only_cache_path(data, im_files, model=model)
 
 
 def _image_shape_hw(im_file: str) -> tuple[int, int]:
@@ -1127,7 +1173,7 @@ def load_pseudo_progress(
     im_files: list[str] | None = None,
     root: Path | None = None,
 ) -> list[dict]:
-    """Load partial/full ``pseudo_labels.cache`` when hash matches; remap ``im_file`` to current paths."""
+    """Load partial/full teacher ``pseudo_labels-*.cache`` when hash matches; remap ``im_file``."""
     labels: list[dict] = []
     cache = try_load_cache(path, expected_hash)
     if cache is not None:
@@ -1177,7 +1223,7 @@ def generate_pseudo_cache_incremental(
     p_hash: str,
     root: Path | None = None,
 ) -> list[dict]:
-    """Infer per image, remap ids, and flush ``pseudo_labels.cache`` after each image (resumable)."""
+    """Infer per image, remap ids, and flush ``pseudo_labels-*.cache`` after each image (resumable)."""
     root = root or _dataset_root(im_files=im_files)
     gt_index = _index_by_image(gt_entries)
     existing = load_pseudo_progress(p_cache_path, p_hash, im_files=im_files, root=root)
@@ -1318,7 +1364,7 @@ def build_merged_pseudo_cache(
 
 
 def rebuild_merged_pseudo_cache(data: dict, im_files: list[str]) -> dict:
-    """Rebuild merged cache from existing ``pseudo_labels.cache`` + GT (no teacher).
+    """Rebuild merged cache from existing ``pseudo_labels-*.cache`` + GT (no teacher).
 
     Used by ``YOLODataset.get_labels`` when ``labels_pseudo_merged.cache`` is missing/stale.
     Remaps cached ``im_file`` paths so caches copied across machines still work.
@@ -1336,7 +1382,7 @@ def rebuild_merged_pseudo_cache(data: dict, im_files: list[str]) -> dict:
         except Exception:
             pass
 
-    p_cache = pseudo_only_cache_path(data, im_files)
+    p_cache = _resolve_pseudo_only_cache_path(data, im_files, root=root)
     if not p_cache.exists():
         raise FileNotFoundError(
             f"Missing {p_cache}. Re-run training with pseudo_label=True to regenerate teacher pseudo cache."
@@ -1385,7 +1431,7 @@ def apply_pseudo_labels_to_subset(
     Pipeline (fixed order):
       1) resolve conflicts + build vocabulary (GT prefix, pseudo appended)
       2) write merged texts to ``<stem>_train.json`` (source JSON untouched)
-      3) teacher inference -> ``pseudo_labels.cache``
+      3) teacher inference -> ``pseudo_labels-{model_stem}.cache``
       4) merge GT + pseudo -> ``labels_pseudo_merged.cache`` (no per-image txt)
     """
     cfg = resolve_pseudo_cfg(data, args)
@@ -1396,7 +1442,7 @@ def apply_pseudo_labels_to_subset(
     classes_arg = cfg["pseudo_label_classes"]
     texts_arg = cfg["pseudo_label_class_texts"]
     conf = cfg["pseudo_label_conf"]
-    imgsz = cfg["imgsz"]
+    imgsz = int(cfg["pseudo_label_imgsz"])
     batch = None if int(cfg["pseudo_label_batch"]) <= 0 else int(cfg["pseudo_label_batch"])
     mem_fraction = cfg["pseudo_label_mem_fraction"]
 
@@ -1407,7 +1453,7 @@ def apply_pseudo_labels_to_subset(
 
     LOGGER.info(
         f"{colorstr('WeDetect pseudo:')} config from dataset/args → "
-        f"model={model_path}, conf={conf}, batch={batch or 'auto'}, "
+        f"model={model_path}, conf={conf}, imgsz={imgsz}, batch={batch or 'auto'}, "
         f"mem_fraction={mem_fraction}"
     )
 
@@ -1433,7 +1479,7 @@ def apply_pseudo_labels_to_subset(
     root = _dataset_root(data, im_files)
     out_root = root or Path(train_path).parent
     meta_path = out_root / PSEUDO_META_NAME
-    p_cache_path = pseudo_only_cache_path(data, im_files)
+    p_cache_path = pseudo_only_cache_path(data, im_files, model=model_path)
     m_cache_path = merged_cache_path(im_files)
     m_hash = merged_cache_hash(im_files, root=root)
     p_hash = _pseudo_only_hash(
@@ -1444,6 +1490,7 @@ def apply_pseudo_labels_to_subset(
         kept_ids,
         conf,
         nc_gt,
+        imgsz,
         root=root,
     )
     h = _meta_hash(
@@ -1456,6 +1503,7 @@ def apply_pseudo_labels_to_subset(
         kept_ids,
         conf,
         new_texts,
+        imgsz,
         root=root,
     )
 
@@ -1539,6 +1587,7 @@ def apply_pseudo_labels_to_subset(
         "hash": h,
         "model": model_path,
         "conf": conf,
+        "imgsz": imgsz,
         "dedup": "class_only",
         "format": "detect_xywhn",
         "pipeline": PSEUDO_CACHE_PIPELINE,

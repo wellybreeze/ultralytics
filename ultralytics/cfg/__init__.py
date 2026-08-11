@@ -1101,10 +1101,18 @@ def entrypoint(debug: str = "") -> None:
         LOGGER.warning(f"'model' argument is missing. Using default 'model={model}'.")
     overrides["model"] = model
     stem = Path(model).stem.lower()
-    if "rtdetr" in stem:  # guess architecture
+    if "rfdetr" in stem or "rf-detr" in stem:  # guess architecture
+        from ultralytics import RFDETR
+
+        model = RFDETR(model, task=task)
+    elif "rtdetr" in stem:  # guess architecture
         from ultralytics import RTDETR
 
         model = RTDETR(model)  # no task argument
+    elif "dfine" in stem:  # guess architecture
+        from ultralytics import DFINE
+
+        model = DFINE(model)  # no task argument
     elif "fastsam" in stem:
         from ultralytics import FastSAM
 

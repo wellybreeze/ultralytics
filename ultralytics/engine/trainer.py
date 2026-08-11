@@ -376,8 +376,8 @@ class BaseTrainer:
                 if TORCH_2_4
                 else torch.cuda.amp.GradScaler(enabled=self.amp)
             )
-        # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
+        # Check imgsz against the model's max stride (YOLO P5/32, RF-DETR patch_size*num_windows, …)
+        gs = int(self.model.stride.max() if hasattr(self.model, "stride") else 32)
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
         self.stride = gs  # for multiscale training
 

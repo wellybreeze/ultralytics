@@ -456,7 +456,7 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
     fused = " (fused)" if getattr(model, "is_fused", lambda: False)() else ""
     fs = f", {flops:.1f} GFLOPs" if flops else ""
     yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
-    model_name = Path(yaml_file).stem.replace("yolo", "YOLO") or "Model"
+    model_name = Path(yaml_file).stem.replace("yolo", "YOLO").replace("rf-detr", "RFDETR").replace("rfdetr", "RFDETR") or "Model"
     LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
     return n_l, n_p, n_g, flops
 
@@ -541,19 +541,33 @@ def get_flops(model, imgsz=640):
 
     try:
         from ultralytics.nn.modules.block import AAttn, Attention  # imported here: block.py imports this module
+        from ultralytics.nn.modules.dfine import DFINEDecoder
         from ultralytics.nn.modules.head import RTDETRDecoder
 
         model = unwrap_model(model)
         p = next(model.parameters())
         if not isinstance(imgsz, list):
             imgsz = [imgsz, imgsz]  # expand if int/float
+        # Prefer declared input channels (YOLO yaml / RF-DETR wrapper); Conv weight shape only when 4-D.
+        yaml = getattr(model, "yaml", None)
+        if isinstance(yaml, dict) and yaml.get("channels") is not None:
+            ch = int(yaml["channels"])
+        elif getattr(model, "channels", None) is not None:
+            ch = int(model.channels)
+        elif getattr(p, "ndim", 0) == 4:
+            ch = int(p.shape[1])
+        else:
+            ch = 3
         attn = tuple(m for m in model.modules() if isinstance(m, (Attention, AAttn)))
-        rtdetr = any(isinstance(m, RTDETRDecoder) for m in model.modules())
+        # RT-DETR / D-FINE cannot run the stride-sized proxy; RF-DETR exposes model_config for the same reason.
+        full_size = hasattr(model, "model_config") or any(
+            isinstance(m, (RTDETRDecoder, DFINEDecoder)) for m in model.modules()
+        )
         # Attention costs are quadratic in image area, so disable THOP's affine proxy.
         stride = None if attn else max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32
-        im = torch.empty((1, p.shape[1], *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
+        im = torch.empty((1, ch, *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
         custom_ops = {Attention: _attention_ops, AAttn: _attention_ops} if attn else None
-        if rtdetr:  # RT-DETR cannot run the stride-sized proxy input
+        if full_size:
             return thop.profile(model, inputs=[im], custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2
         return thop.profile(model, inputs=[im], stride=stride, custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2
     except Exception:

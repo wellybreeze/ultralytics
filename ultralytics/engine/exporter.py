@@ -91,11 +91,15 @@ from ultralytics.nn.modules import (
     Detect,
     Pose,
     Pose26,
+    DFINEDecoder,
     RTDETRDecoder,
     Segment,
     Segment26,
     SemanticSegment,
 )
+
+# DETR-style decoders share export / NMS constraints (end2end, opset, max_det clamp).
+_DETR_DECODERS = (RTDETRDecoder, DFINEDecoder)
 from ultralytics.nn.tasks import ClassificationModel, DepthModel, DetectionModel, SegmentationModel, WeDetectModel, WorldModel
 from ultralytics.utils import (
     ARM64,
@@ -762,7 +766,7 @@ class Exporter:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not is_tf_format or TORCH_1_13, "TensorFlow exports with NMS require torch>=1.13"
             assert fmt != "onnx" or TORCH_1_13, "ONNX export with NMS requires torch>=1.13"
-            if getattr(model, "end2end", False) or isinstance(model.model[-1], RTDETRDecoder):
+            if getattr(model, "end2end", False) or isinstance(model.model[-1], _DETR_DECODERS):
                 LOGGER.warning("'nms=True' is not available for end2end models. Forcing 'nms=False'.")
                 self.args.nms = False
             self.args.conf = self.args.conf or 0.25  # set conf default value for nms export
@@ -780,8 +784,8 @@ class Exporter:
                 assert not self.args.nms, (
                     "'nms=True' cannot be used together with 'dynamic=True' for CoreML export. Please disable one of them."
                 )
-                assert model.task != "classify" and not isinstance(model.model[-1], RTDETRDecoder), (
-                    "'dynamic=True' is not supported for CoreML classification or RT-DETR models."
+                assert model.task != "classify" and not isinstance(model.model[-1], _DETR_DECODERS), (
+                    "'dynamic=True' is not supported for CoreML classification or RT-DETR/D-FINE models."
                 )
         if (fmt in {"engine", "coreml"} or self.args.nms) and self.args.dynamic and self.args.batch == 1:
             LOGGER.warning(
@@ -888,14 +892,14 @@ class Exporter:
                     m.bake_argmax = check_version(f"tensorrt-cu{cuda_major}", ">=10.0.0") or check_version(
                         "tensorrt", ">=10.0.0"
                     )
-            if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
+            if isinstance(m, (Detect, *_DETR_DECODERS)):  # includes Detect subclasses + DETR decoders
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
                 # Clamp max_det to available queries/anchors (required for TensorRT compatibility)
                 available = (
                     m.num_queries
-                    if isinstance(m, RTDETRDecoder)
+                    if isinstance(m, _DETR_DECODERS)
                     else sum(int(self.imgsz[0] / s) * int(self.imgsz[1] / s) for s in model.stride.tolist())
                 )
                 m.max_det = min(self.args.max_det, available)
@@ -1071,7 +1075,7 @@ class Exporter:
         from ultralytics.utils.export.engine import best_onnx_opset, torch2onnx
 
         opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type, quantize=self.args.quantize)
-        assert not isinstance(self.model.model[-1], RTDETRDecoder) or opset >= 16, "RTDETR export requires opset>=16"
+        assert not isinstance(self.model.model[-1], _DETR_DECODERS) or opset >= 16, "RTDETR/DFINE export requires opset>=16"
         LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset}...")
         if self.args.nms:
             assert TORCH_1_13, f"'nms=True' ONNX export requires torch>=1.13 (found torch=={TORCH_VERSION})"
@@ -1538,9 +1542,9 @@ class Exporter:
             )
 
         # Export to ONNX
-        if isinstance(self.model.model[-1], RTDETRDecoder):
+        if isinstance(self.model.model[-1], _DETR_DECODERS):
             self.args.opset = self.args.opset or 19
-            assert self.args.opset <= 19, "RTDETR TensorFlow export requires opset<=19"
+            assert 16 <= self.args.opset <= 19, "RTDETR/DFINE TensorFlow export requires opset>=16;<=19"
         self.args.simplify = True
         f_onnx = self.export_onnx()  # ensure ONNX is available
         keras_model = onnx2saved_model(

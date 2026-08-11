@@ -108,20 +108,21 @@ class HGStem(nn.Module):
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
     """
 
-    def __init__(self, c1: int, cm: int, c2: int):
+    def __init__(self, c1: int, cm: int, c2: int, use_lab: bool = False):
         """Initialize the StemBlock of PPHGNetV2.
 
         Args:
             c1 (int): Input channels.
             cm (int): Middle channels.
             c2 (int): Output channels.
+            use_lab (bool): Enable D-FINE LearnableAffineBlock after each stem activation.
         """
         super().__init__()
-        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU())
-        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU())
-        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU())
-        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU())
-        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU())
+        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU(), use_lab=use_lab)
+        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU(), use_lab=use_lab)
+        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU(), use_lab=use_lab)
+        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU(), use_lab=use_lab)
+        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU(), use_lab=use_lab)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=1, padding=0, ceil_mode=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -153,6 +154,7 @@ class HGBlock(nn.Module):
         n: int = 6,
         lightconv: bool = False,
         shortcut: bool = False,
+        use_lab: bool = False,
         act: nn.Module | None = None,
     ):
         """Initialize HGBlock with specified parameters.
@@ -165,14 +167,17 @@ class HGBlock(nn.Module):
             n (int): Number of LightConv or Conv blocks.
             lightconv (bool): Whether to use LightConv.
             shortcut (bool): Whether to use shortcut connection.
+            use_lab (bool): Enable D-FINE LearnableAffineBlock (N/S/M backbones).
             act (nn.Module): Activation function.
         """
         super().__init__()
         act = nn.ReLU() if act is None else act
         block = LightConv if lightconv else Conv
-        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act) for i in range(n))
-        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act)  # squeeze conv
-        self.ec = Conv(c2 // 2, c2, 1, 1, act=act)  # excitation conv
+        self.m = nn.ModuleList(
+            block(c1 if i == 0 else cm, cm, k=k, act=act, use_lab=use_lab) for i in range(n)
+        )
+        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act, use_lab=use_lab)  # squeeze conv
+        self.ec = Conv(c2 // 2, c2, 1, 1, act=act, use_lab=use_lab)  # excitation conv
         self.add = shortcut and c1 == c2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

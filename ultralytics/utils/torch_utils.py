@@ -81,11 +81,13 @@ def torch_distributed_zero_first(local_rank: int):
         dist.barrier(device_ids=[torch.cuda.current_device()]) if use_ids else dist.barrier()
 
 
-def smart_inference_mode():
-    """Apply torch.inference_mode() decorator if torch>=1.10.0, else torch.no_grad() decorator."""
+def smart_inference_mode(mode=True):
+    """Apply or disable torch inference mode while supporting the minimum torch version."""
 
     def decorate(fn):
         """Apply appropriate torch decorator for inference mode based on torch version."""
+        if not mode:
+            return torch.inference_mode(False)(torch.no_grad()(fn)) if TORCH_1_9 else torch.no_grad()(fn)
         if TORCH_1_9 and torch.is_inference_mode_enabled():
             return fn  # already in inference_mode, act as a pass-through
         else:
@@ -539,6 +541,8 @@ def get_flops(model, imgsz=640):
 
     try:
         from ultralytics.nn.modules.block import AAttn, Attention  # imported here: block.py imports this module
+        from ultralytics.nn.modules.dfine import DFINEDecoder
+        from ultralytics.nn.modules.head import RTDETRDecoder
 
         model = unwrap_model(model)
         p = next(model.parameters())
@@ -555,18 +559,16 @@ def get_flops(model, imgsz=640):
         else:
             ch = 3
         attn = tuple(m for m in model.modules() if isinstance(m, (Attention, AAttn)))
-        # attention costs scale with the square of the image area, so a model carrying one is measured at full size;
-        # stride= extrapolates from a stride-sized sample, which is affine in area and would land ~97% low on it.
-        # RF-DETR exposes model_config; its transformer FLOPs do not scale linearly from a tiny grid.
-        stride = (
-            None
-            if attn or hasattr(model, "model_config")
-            else max(int(model.stride.max()), 32)
-            if hasattr(model, "stride")
-            else 32
-        )  # max stride
+        # RT-DETR / D-FINE cannot run the stride-sized proxy; RF-DETR exposes model_config for the same reason.
+        full_size = hasattr(model, "model_config") or any(
+            isinstance(m, (RTDETRDecoder, DFINEDecoder)) for m in model.modules()
+        )
+        # Attention costs are quadratic in image area, so disable THOP's affine proxy.
+        stride = None if attn else max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32
         im = torch.empty((1, ch, *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
         custom_ops = {Attention: _attention_ops, AAttn: _attention_ops} if attn else None
+        if full_size:
+            return thop.profile(model, inputs=[im], custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2
         return thop.profile(model, inputs=[im], stride=stride, custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2
     except Exception:
         return 0.0

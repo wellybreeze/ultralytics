@@ -270,6 +270,8 @@ CFG_INT_KEYS = frozenset(
         "warmup_iters",
         "pseudo_label_batch",
         "pseudo_label_imgsz",
+        "pseudo_label_flush_every",
+        "pseudo_label_prefetch",
     }
 )
 CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds

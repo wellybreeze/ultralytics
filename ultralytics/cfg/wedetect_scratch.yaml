@@ -61,7 +61,7 @@ close_set: False # (bool) close-set fine-tuning: discard text encoder, use cache
 mask_refine: False # (bool) refine boxes from segmentation masks (WeDetect mask2bbox); requires segment-format labels
 # Pseudo-label global fallbacks — prefer setting these on the dataset YAML instead
 pseudo_label: False # (bool) used only when dataset YAML omits pseudo_label
-pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / SAM3)
+pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / D-FINE / SAM3)
 pseudo_label_classes: "" # (str) teacher class file fallback; empty = COCO names
 pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_zh
 pseudo_label_conf: 0.25 # (float) teacher conf fallback

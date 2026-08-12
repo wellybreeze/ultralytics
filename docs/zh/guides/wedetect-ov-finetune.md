@@ -392,7 +392,7 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 | 配置项                        | 默认                              | 说明                                                                                    |
 | ----------------------------- | --------------------------------- | --------------------------------------------------------------------------------------- |
 | `pseudo_label`              | `False`                         | 是否对本数据集 train 启用                                                               |
-| `pseudo_label_model`        | `sam3.pt`                       | 教师：`sam3.pt` / YOLO `.pt` / WeDetect `.pt`                                     |
+| `pseudo_label_model`        | `sam3.pt`                       | 教师：`sam3.pt` / YOLO `.pt` / WeDetect `.pt` / D-FINE `.pt`                     |
 | `pseudo_label_classes`      | 空 →`coco.yaml` 的 `names`   | 教师英文/源词表（与下项同序）                                                           |
 | `pseudo_label_class_texts`  | 空 →`coco_zh_class_texts.json` | 同序中文伪标词表；**写入合并 `class_texts` 的是中文**                           |
 | `pseudo_label_conf`         | `0.25`                          | 教师置信度阈值                                                                          |
@@ -416,7 +416,7 @@ pseudo_label_mem_fraction: 0.85
 
 教师 batch 策略：
 
-- **YOLO / WeDetect**：warmup `batch=1` 测激活显存 → 按 `free×mem_fraction` 估计 → 在 `1,2,4,…` 上几何探测，OOM 回退；全量 `predict(..., batch=bsz, stream=True)`
+- **YOLO / WeDetect / D-FINE**：warmup `batch=1` 测激活显存 → 按 `free×mem_fraction` 估计 → 在 `1,2,4,…` 上几何探测，OOM 回退；全量 `predict(..., batch=bsz, stream=True)`
 - **SAM3**：逐图 `set_image`（API 限制 `batch=1`）；按空闲显存选择 prompt chunk（约 16–128），OOM 时 chunk 减半重试
 
 #### 固定流水线

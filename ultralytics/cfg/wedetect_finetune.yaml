@@ -38,7 +38,7 @@
 #   Preferred: set pseudo_label* on the dataset YAML (per-subset; see wedetect_vehicle.yaml).
 #   Keys here / CLI are fallbacks when a dataset omits them (dataset YAML wins if present).
 #   pseudo_label=True
-#   pseudo_label_model=sam3.pt|yolo11x.pt|wedetect_base.pt
+#   pseudo_label_model=sam3.pt|yolo11x.pt|wedetect_base.pt|dfine-l.pt
 #   pseudo_label_imgsz=640  # teacher size; independent of train imgsz
 #   Writes pseudo_labels-{model_stem}.cache + labels_pseudo_merged.cache; class-level dedup only.
 
@@ -88,7 +88,7 @@ close_set: False # (bool) close-set fine-tuning: discard text encoder, use cache
 mask_refine: False # (bool) refine boxes from segmentation masks (WeDetect mask2bbox); requires segment-format labels
 # Pseudo-label global fallbacks — prefer setting these on the dataset YAML instead
 pseudo_label: False # (bool) used only when dataset YAML omits pseudo_label
-pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / SAM3)
+pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / D-FINE / SAM3)
 pseudo_label_classes: "" # (str) teacher class file fallback; empty = COCO names
 pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_zh
 pseudo_label_conf: 0.25 # (float) teacher conf fallback

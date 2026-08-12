@@ -6,9 +6,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
+import threading
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -37,8 +40,10 @@ DEFAULT_CLASSES = ROOT / "cfg/datasets/coco.yaml"
 DEFAULT_CLASS_TEXTS = ROOT / "cfg/datasets/texts/coco_zh_class_texts.json"
 PSEUDO_CACHE_PIPELINE = "pseudo_cache_portable_v1"  # relative-path hashes; cross-machine reusable
 PORTABLE_HASH_MODE = "rel_v1"
-# Avoid O(N^2) full-cache rewrite
-PSEUDO_FLUSH_EVERY = 50  # images between incremental cache flushes
+# Incremental teacher-cache flush interval (images); batch commits amortize flush cost
+PSEUDO_FLUSH_EVERY = 200
+# Prefetch this many loader batches ahead of GPU inference (YOLO / WeDetect / D-FINE)
+PSEUDO_PREFETCH_BATCHES = 2
 
 # Dataset-yaml keys (per-subset). Resolution: data[key] > train args > defaults.
 PSEUDO_CFG_KEYS = (
@@ -50,6 +55,8 @@ PSEUDO_CFG_KEYS = (
     "pseudo_label_batch",
     "pseudo_label_mem_fraction",
     "pseudo_label_imgsz",
+    "pseudo_label_flush_every",
+    "pseudo_label_prefetch",
 )
 
 
@@ -97,6 +104,18 @@ def resolve_pseudo_cfg(data: dict | None, args: Any = None) -> dict[str, Any]:
     except (TypeError, ValueError):
         imgsz = 640
     imgsz = max(1, imgsz)
+    flush_arg = _pick("pseudo_label_flush_every", PSEUDO_FLUSH_EVERY)
+    try:
+        flush_every = int(flush_arg) if flush_arg is not None else PSEUDO_FLUSH_EVERY
+    except (TypeError, ValueError):
+        flush_every = PSEUDO_FLUSH_EVERY
+    flush_every = max(1, flush_every)
+    prefetch_arg = _pick("pseudo_label_prefetch", PSEUDO_PREFETCH_BATCHES)
+    try:
+        prefetch = int(prefetch_arg) if prefetch_arg is not None else PSEUDO_PREFETCH_BATCHES
+    except (TypeError, ValueError):
+        prefetch = PSEUDO_PREFETCH_BATCHES
+    prefetch = max(0, prefetch)
 
     return {
         "pseudo_label": enabled,
@@ -107,6 +126,8 @@ def resolve_pseudo_cfg(data: dict | None, args: Any = None) -> dict[str, Any]:
         "pseudo_label_batch": batch_i,  # <=0 means auto
         "pseudo_label_mem_fraction": mem_fraction,
         "pseudo_label_imgsz": imgsz,
+        "pseudo_label_flush_every": flush_every,
+        "pseudo_label_prefetch": prefetch,
     }
 
 
@@ -405,6 +426,77 @@ def _is_wedetect_ckpt(model: str) -> bool:
         return False
 
 
+def _is_dfine_ckpt(model: str) -> bool:
+    """Return True if ``model`` is a D-FINE detect checkpoint or YAML."""
+    stem = Path(model).stem.lower()
+    if "dfine" in stem:
+        return True
+    try:
+        import torch
+
+        ckpt = torch.load(model, map_location="cpu", weights_only=False)
+        m = ckpt.get("ema") or ckpt.get("model")
+        if m is None:
+            return False
+        if type(m).__name__ == "DFINEDetectionModel":
+            return True
+        last = m.model[-1] if hasattr(m, "model") and len(m.model) else None
+        return last is not None and last._get_name() == "DFINEDecoder"
+    except Exception:
+        return False
+
+
+def _dfine_teacher_cls_map(
+    model: Any,
+    kept_src_ids: list[int],
+    kept_en: list[list[str]],
+) -> tuple[list[int], dict[int, int]]:
+    """Map pseudo teacher source ids to D-FINE head class indices.
+
+    COCO checkpoints (``nc=80``) use contiguous ids. Objects365 checkpoints (``nc=366``)
+    reserve index 0 for background and match kept English prompts to head names.
+    """
+    from ultralytics.models.dfine.model import ensure_dfine_class_names
+
+    inner = getattr(model, "model", model)
+    ensure_dfine_class_names(inner)
+    names = getattr(inner, "names", {}) or {}
+    nc = int(getattr(inner, "nc", None) or len(names) or 80)
+    name_to_cls = {str(v).strip().lower(): int(k) for k, v in names.items()}
+
+    classes_filter: list[int] = []
+    cls_to_kept: dict[int, int] = {}
+    for k, sid in enumerate(kept_src_ids):
+        teacher_cls = None
+        if nc == 80 and sid < nc:
+            teacher_cls = sid
+        else:
+            en_group = kept_en[k] if k < len(kept_en) else []
+            for en in en_group:
+                hit = name_to_cls.get(str(en).strip().lower())
+                if hit is not None and (nc != 366 or hit != 0):
+                    teacher_cls = hit
+                    break
+        if teacher_cls is None or teacher_cls in cls_to_kept:
+            continue
+        classes_filter.append(teacher_cls)
+        cls_to_kept[teacher_cls] = k
+    return classes_filter, cls_to_kept
+
+
+def _map_detect_results_to_kept(arr: np.ndarray, cls_to_kept: dict[int, int]) -> np.ndarray:
+    """Remap fixed-vocab detect rows to local kept indices ``0..len(kept)-1``."""
+    if not len(arr):
+        return arr
+    mapped = []
+    for row in arr:
+        cid = int(row[0])
+        if cid not in cls_to_kept:
+            continue
+        mapped.append([cls_to_kept[cid], *row[1:5]])
+    return np.array(mapped, dtype=np.float32) if mapped else np.zeros((0, 5), dtype=np.float32)
+
+
 def _results_to_xywhn(result) -> np.ndarray:
     """Convert ultralytics Results to detect rows (N,5) cls+xywhn.
 
@@ -571,6 +663,91 @@ def auto_predict_batch(
     return int(best)
 
 
+class _PrefetchBatchIterator:
+    """Background-prefetch batches from ``LoadImagesAndVideos`` while GPU runs inference."""
+
+    def __init__(self, it, buffer: int = 2):
+        self._it = it
+        self._q: queue.Queue = queue.Queue(maxsize=max(1, buffer))
+        self._exc: BaseException | None = None
+        self._thread: threading.Thread | None = None
+
+    def _worker(self) -> None:
+        try:
+            for batch in self._it:
+                self._q.put(batch)
+        except BaseException as e:
+            self._exc = e
+        finally:
+            self._q.put(None)
+
+    def __iter__(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+        while True:
+            batch = self._q.get()
+            if batch is None:
+                if self._exc is not None:
+                    raise self._exc
+                break
+            yield batch
+
+
+def _unique_label_entries(entries_by_key: dict[str, dict]) -> list[dict]:
+    """Deduplicate label dicts referenced under multiple keys (path + basename)."""
+    seen: set[int] = set()
+    out: list[dict] = []
+    for lb in entries_by_key.values():
+        oid = id(lb)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        out.append(lb)
+    return out
+
+
+def _ensure_teacher_predictor(model: Any, predict_kw: dict[str, Any]):
+    """Return a configured Ultralytics predictor for pseudo-label teacher inference."""
+    from ultralytics.cfg import get_cfg
+
+    custom = {"mode": "predict", "rect": False, "verbose": False, "save": False}
+    args = {**getattr(model, "overrides", {}), **custom, **predict_kw}
+    device = args.get("device")
+    predictor = getattr(model, "predictor", None)
+    if predictor is None or getattr(getattr(predictor, "args", None), "device", None) != device:
+        predictor = model._smart_load("predictor")(
+            overrides=args, _callbacks=getattr(model, "callbacks", None)
+        )
+        predictor.setup_model(model=model.model, verbose=False)
+        model.predictor = predictor
+    else:
+        predictor.args = get_cfg(predictor.args, args)
+    predictor.stream = True
+    return predictor
+
+
+def _consume_predict_results(
+    results,
+    *,
+    bsz: int,
+    map_fn: Callable[[Any], np.ndarray] | None,
+    deliver_batch: Callable[[list[tuple[str, np.ndarray]]], None],
+) -> None:
+    """Drain predictor stream; commit per batch to keep GPU busy between loader batches."""
+    buf: list[tuple[str, np.ndarray]] = []
+    for r in results:
+        arr = map_fn(r) if map_fn is not None else _results_to_xywhn(r)
+        buf.append((str(r.path), arr))
+        r.orig_img = None
+        r.boxes = None
+        if len(buf) >= max(1, bsz):
+            deliver_batch(buf)
+            buf = []
+    if buf:
+        deliver_batch(buf)
+
+
 def _predict_path_list(
     model: Any,
     im_files: list[str],
@@ -581,6 +758,7 @@ def _predict_path_list(
     device: str | int | None,
     classes: list[int] | None = None,
     work_dir: Path | None = None,
+    prefetch_batches: int = PSEUDO_PREFETCH_BATCHES,
 ):
     """Stream predictions over image paths with true image-batch size ``bsz``.
 
@@ -589,26 +767,63 @@ def _predict_path_list(
     ``LoadPilAndNumpy`` with ``bs=len(list)``, which loads the entire list into
     **one** GPU batch (e.g. 512 images → OOM). A ``.txt`` source uses
     ``LoadImagesAndVideos`` and respects ``batch=bsz``.
+
+    When ``prefetch_batches > 0``, the next loader batch is read on a background
+    thread while the GPU runs inference on the current batch.
     """
+    from ultralytics.utils import ops
+
     work_dir = Path(work_dir) if work_dir is not None else Path(im_files[0]).parent
     work_dir.mkdir(parents=True, exist_ok=True)
     txt = work_dir / f".wedetect_pseudo_sources_{os.getpid()}.txt"
     txt.write_text("\n".join(str(p) for p in im_files) + "\n", encoding="utf-8")
     predict_kw = dict(
-        source=str(txt),
-        stream=True,
         conf=conf,
         imgsz=imgsz,
         device=device,
-        verbose=False,
-        save=False,
         batch=int(bsz),
         rect=False,  # fixed square letterbox → stable VRAM vs default rect=True
     )
     if classes is not None:
         predict_kw["classes"] = classes
+    predictor = _ensure_teacher_predictor(model, predict_kw)
     try:
-        yield from model.predict(**predict_kw)
+        predictor.setup_source(str(txt))
+        loader = iter(predictor.dataset)
+        if prefetch_batches > 0:
+            loader = _PrefetchBatchIterator(loader, buffer=prefetch_batches)
+
+        predictor.seen = 0
+        predictor.done_warmup = False
+        profilers = (
+            ops.Profile(device=predictor.device),
+            ops.Profile(device=predictor.device),
+            ops.Profile(device=predictor.device),
+        )
+
+        lock = getattr(predictor, "_lock", None)
+        with lock if lock is not None else nullcontext():
+            for batch in loader:
+                predictor.batch = batch
+                paths, im0s, _s = batch
+                with profilers[0]:
+                    im = predictor.preprocess(im0s)
+                if not predictor.done_warmup:
+                    predictor.model.warmup(im=im)
+                    predictor.done_warmup = True
+                with profilers[1]:
+                    preds = predictor.inference(im)
+                with profilers[2]:
+                    results = predictor.postprocess(preds, im, im0s)
+                n = len(im0s)
+                for i in range(n):
+                    predictor.seen += 1
+                    results[i].speed = {
+                        "preprocess": profilers[0].dt * 1e3 / n,
+                        "inference": profilers[1].dt * 1e3 / n,
+                        "postprocess": profilers[2].dt * 1e3 / n,
+                    }
+                yield from results
     finally:
         try:
             txt.unlink(missing_ok=True)
@@ -628,14 +843,16 @@ def run_teacher_inference(
     batch: int | None = None,
     mem_fraction: float = 0.85,
     on_image: Any | None = None,
+    on_batch: Callable[[list[tuple[str, np.ndarray]]], None] | None = None,
+    prefetch_batches: int = PSEUDO_PREFETCH_BATCHES,
 ) -> dict[str, np.ndarray]:
     """Run teacher model; return {im_file: (N,5) with cls in 0..len(kept)-1}.
 
-    YOLO/WeDetect use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0).
+    YOLO/WeDetect/DFINE use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0).
     SAM3 does not support image batching; prompt chunk size is auto-tuned instead.
 
-    ``on_image(im_file, arr_local)`` is invoked after each image finishes all class
-    prompts (used for per-image cache flush / crash resume).
+    ``on_batch`` / ``on_image`` persist predictions (used for cache flush / crash resume).
+    Prefer ``on_batch`` to amortize cache I/O across loader batches.
     """
     prompts_zh = [g[0] for g in kept_zh]
     out: dict[str, np.ndarray] = {}
@@ -645,19 +862,27 @@ def run_teacher_inference(
     committed_paths: set[str] = set()
     committed_names: set[str] = set()
 
-    def _emit(im: str, arr: np.ndarray) -> None:
-        committed_paths.add(im)
-        committed_names.add(Path(im).name)
-        if on_image is not None:
-            # Caller owns persistence; avoid duplicating all preds in ``out`` (RAM)
-            on_image(im, arr)
+    def _deliver_batch(batch: list[tuple[str, np.ndarray]]) -> None:
+        """Record committed images then forward to ``on_batch`` / ``on_image`` / ``out``."""
+        for im, arr in batch:
+            committed_paths.add(im)
+            committed_names.add(Path(im).name)
+        if on_batch is not None:
+            on_batch(batch)
+        elif on_image is not None:
+            for im, arr in batch:
+                on_image(im, arr)
         else:
-            out[im] = arr
+            for im, arr in batch:
+                out[im] = arr
+
+    def _emit(im: str, arr: np.ndarray) -> None:
+        _deliver_batch([(im, arr)])
 
     def _fill_missing() -> None:
         for im in im_files:
             if im in committed_paths or Path(im).name in committed_names:
-                if on_image is None and im not in out:
+                if on_batch is None and on_image is None and im not in out:
                     hit = next((v for k, v in out.items() if Path(k).name == Path(im).name), None)
                     if hit is not None:
                         out[im] = hit
@@ -744,12 +969,68 @@ def run_teacher_inference(
             imgsz=imgsz,
             device=device,
             work_dir=Path(im_files[0]).parent,
+            prefetch_batches=prefetch_batches,
         )
-        for r in results:
-            path = str(r.path)
-            _emit(path, _results_to_xywhn(r))
-            r.orig_img = None
-            r.boxes = None
+        _consume_predict_results(results, bsz=bsz, map_fn=_results_to_xywhn, deliver_batch=_deliver_batch)
+        _fill_missing()
+        return out
+
+    if _is_dfine_ckpt(model_path):
+        from ultralytics import DFINE
+
+        model = DFINE(model_path)
+        classes_filter, cls_to_kept = _dfine_teacher_cls_map(model, kept_src_ids, kept_en)
+        if not classes_filter:
+            LOGGER.warning(
+                f"{colorstr('WeDetect pseudo:')} D-FINE teacher matched no kept classes for {model_path}; skip inference"
+            )
+            _fill_missing()
+            return out
+        bsz = (
+            int(batch)
+            if batch is not None and int(batch) > 0
+            else auto_predict_batch(
+                model, device, im_files[0], conf=conf, imgsz=imgsz, fraction=mem_fraction, classes=classes_filter
+            )
+        )
+        while bsz >= 1:
+            try:
+                LOGGER.info(
+                    f"{colorstr('WeDetect pseudo:')} D-FINE teacher '{model_path}', batch={bsz}, "
+                    f"images={len(im_files)}, head_classes={classes_filter[:8]}"
+                    f"{'...' if len(classes_filter) > 8 else ''}"
+                )
+                results = _predict_path_list(
+                    model,
+                    im_files,
+                    bsz=bsz,
+                    conf=conf,
+                    imgsz=imgsz,
+                    device=device,
+                    classes=classes_filter,
+                    work_dir=Path(im_files[0]).parent,
+                    prefetch_batches=prefetch_batches,
+                )
+                _consume_predict_results(
+                    results,
+                    bsz=bsz,
+                    map_fn=lambda r: _map_detect_results_to_kept(_results_to_xywhn(r), cls_to_kept),
+                    deliver_batch=_deliver_batch,
+                )
+                break
+            except RuntimeError as e:
+                if not _is_oom_error(e) or bsz <= 1:
+                    raise
+                import torch
+
+                torch.cuda.empty_cache()
+                if committed_paths:
+                    raise RuntimeError(
+                        f"D-FINE teacher OOM at batch={bsz} after {len(committed_paths)} images; "
+                        f"set pseudo_label_batch={max(1, bsz // 2)} and re-run to resume. ({e})"
+                    ) from e
+                bsz = max(1, bsz // 2)
+                LOGGER.warning(f"{colorstr('WeDetect pseudo:')} D-FINE OOM before first image, retry batch={bsz}")
         _fill_missing()
         return out
 
@@ -757,7 +1038,7 @@ def run_teacher_inference(
     from ultralytics import YOLO
 
     model = YOLO(model_path)
-    src_to_kept = {sid: k for k, sid in enumerate(kept_src_ids)}
+    cls_to_kept = {sid: k for k, sid in enumerate(kept_src_ids)}
     classes_filter = kept_src_ids
     bsz = (
         int(batch)
@@ -788,20 +1069,14 @@ def run_teacher_inference(
                 device=device,
                 classes=classes_filter if classes_filter else None,
                 work_dir=Path(im_files[0]).parent,
+                prefetch_batches=prefetch_batches,
             )
-            for r in results:
-                arr = _results_to_xywhn(r)
-                if len(arr):
-                    mapped = []
-                    for row in arr:
-                        sid = int(row[0])
-                        if sid not in src_to_kept:
-                            continue
-                        mapped.append([src_to_kept[sid], *row[1:5]])
-                    arr = np.array(mapped, dtype=np.float32) if mapped else np.zeros((0, 5), dtype=np.float32)
-                _emit(str(r.path), arr)
-                r.orig_img = None
-                r.boxes = None
+            _consume_predict_results(
+                results,
+                bsz=bsz,
+                map_fn=lambda r: _map_detect_results_to_kept(_results_to_xywhn(r), cls_to_kept),
+                deliver_batch=_deliver_batch,
+            )
             break
         except RuntimeError as e:
             if not _is_oom_error(e) or bsz <= 1:
@@ -1222,8 +1497,11 @@ def generate_pseudo_cache_incremental(
     p_cache_path: Path,
     p_hash: str,
     root: Path | None = None,
+    flush_every: int = PSEUDO_FLUSH_EVERY,
+    prefetch_batches: int = PSEUDO_PREFETCH_BATCHES,
 ) -> list[dict]:
-    """Infer per image, remap ids, and flush ``pseudo_labels-*.cache`` after each image (resumable)."""
+    """Infer per image, remap ids, and flush ``pseudo_labels-*.cache`` incrementally (resumable)."""
+    flush_every = max(1, int(flush_every))
     root = root or _dataset_root(im_files=im_files)
     gt_index = _index_by_image(gt_entries)
     existing = load_pseudo_progress(p_cache_path, p_hash, im_files=im_files, root=root)
@@ -1255,9 +1533,9 @@ def generate_pseudo_cache_incremental(
 
     def _flush(*, force: bool = False) -> None:
         nonlocal since_flush
-        if not force and since_flush < PSEUDO_FLUSH_EVERY:
+        if not force and since_flush < flush_every:
             return
-        labels = _ordered_pseudo_labels(im_files, entries_by_key)
+        labels = _unique_label_entries(entries_by_key)
         n = len(labels)
         save_label_cache(
             p_cache_path,
@@ -1273,8 +1551,7 @@ def generate_pseudo_cache_incremental(
         )
         since_flush = 0
 
-    def _commit(im: str, pred_local: np.ndarray) -> None:
-        nonlocal since_flush
+    def _store_entry(im: str, pred_local: np.ndarray) -> bool:
         gt_lb = _lookup_label(gt_index, im)
         if gt_lb is not None:
             shape = tuple(gt_lb["shape"])
@@ -1287,9 +1564,17 @@ def generate_pseudo_cache_incremental(
         was_new = im not in entries_by_key and Path(im).name not in entries_by_key
         entries_by_key[im] = entry
         entries_by_key[Path(im).name] = entry
-        if was_new:
-            since_flush += 1
-            pbar.update(1)
+        return was_new
+
+    def _commit_batch(batch: list[tuple[str, np.ndarray]]) -> None:
+        nonlocal since_flush
+        n_new = 0
+        for im, pred_local in batch:
+            if _store_entry(im, pred_local):
+                n_new += 1
+        if n_new:
+            since_flush += n_new
+            pbar.update(n_new)
             _flush(force=False)
 
     try:
@@ -1304,7 +1589,8 @@ def generate_pseudo_cache_incremental(
             imgsz=imgsz,
             batch=batch,
             mem_fraction=mem_fraction,
-            on_image=_commit,
+            on_batch=_commit_batch,
+            prefetch_batches=prefetch_batches,
         )
         _flush(force=True)
     finally:
@@ -1312,7 +1598,8 @@ def generate_pseudo_cache_incremental(
 
     LOGGER.info(
         f"{colorstr('WeDetect pseudo:')} wrote {p_cache_path} "
-        f"({len(im_files)} images, resume-safe, flush_every={PSEUDO_FLUSH_EVERY}, portable hash)"
+        f"({len(im_files)} images, resume-safe, flush_every={flush_every}, "
+        f"prefetch={prefetch_batches}, portable hash)"
     )
     return _ordered_pseudo_labels(im_files, entries_by_key)
 
@@ -1445,6 +1732,8 @@ def apply_pseudo_labels_to_subset(
     imgsz = int(cfg["pseudo_label_imgsz"])
     batch = None if int(cfg["pseudo_label_batch"]) <= 0 else int(cfg["pseudo_label_batch"])
     mem_fraction = cfg["pseudo_label_mem_fraction"]
+    flush_every = int(cfg["pseudo_label_flush_every"])
+    prefetch_batches = int(cfg["pseudo_label_prefetch"])
 
     train_path = data.get("train")
     if not train_path:
@@ -1454,7 +1743,7 @@ def apply_pseudo_labels_to_subset(
     LOGGER.info(
         f"{colorstr('WeDetect pseudo:')} config from dataset/args → "
         f"model={model_path}, conf={conf}, imgsz={imgsz}, batch={batch or 'auto'}, "
-        f"mem_fraction={mem_fraction}"
+        f"mem_fraction={mem_fraction}, flush_every={flush_every}, prefetch={prefetch_batches}"
     )
 
     # --- 1) vocabulary ---
@@ -1553,7 +1842,7 @@ def apply_pseudo_labels_to_subset(
     # --- 4) pseudo-only cache: per-image flush + crash resume ---
     LOGGER.info(
         f"{colorstr('WeDetect pseudo:')} teacher conf={conf}; "
-        f"vocab nc_gt={nc_gt} + pseudo={len(kept_zh)} (per-image cache flush, class-level dedup)"
+        f"vocab nc_gt={nc_gt} + pseudo={len(kept_zh)} (batch cache flush, class-level dedup)"
     )
     pseudo_entries = generate_pseudo_cache_incremental(
         model_path=model_path,
@@ -1571,6 +1860,8 @@ def apply_pseudo_labels_to_subset(
         p_cache_path=p_cache_path,
         p_hash=p_hash,
         root=root,
+        flush_every=flush_every,
+        prefetch_batches=prefetch_batches,
     )
 
     # --- 5) merge -> labels_pseudo_merged.cache ---

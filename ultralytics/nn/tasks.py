@@ -1223,7 +1223,7 @@ class DFINEDetectionModel(RTDETRDetectionModel):
             self._freeze_backbone_norm()
 
     def fuse(self, verbose=True, imgsz=640):
-        """Fuse like official ``DEFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
+        """Fuse like official ``DFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
 
         Official deploy calls ``convert_to_deploy`` on ``ConvNormLayer_fuse`` / ``VGGBlock`` / decoder
         heads. YAML maps HybridEncoder ``lateral_convs`` to top-level ``Conv(..., act=False)`` layers

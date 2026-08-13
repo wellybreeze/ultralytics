@@ -93,9 +93,9 @@ class YOLO(Model):
                 self.__class__ = type(new_instance)
                 self.__dict__ = new_instance.__dict__
             elif hasattr(self.model, "model") and "DFINEDecoder" in self.model.model[-1]._get_name():
-                from ultralytics import DEFINE
+                from ultralytics import DFINE
 
-                new_instance = DEFINE(self)
+                new_instance = DFINE(self)
                 self.__class__ = type(new_instance)
                 self.__dict__ = new_instance.__dict__
 

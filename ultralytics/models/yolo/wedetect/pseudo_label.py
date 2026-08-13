@@ -432,7 +432,7 @@ def _is_wedetect_ckpt(model: str) -> bool:
 def _is_dfine_ckpt(model: str) -> bool:
     """Return True if ``model`` is a D-FINE detect checkpoint or YAML."""
     stem = Path(model).stem.lower()
-    if "define" in stem:
+    if "dfine" in stem:
         return True
     try:
         import torch
@@ -847,7 +847,7 @@ def run_teacher_inference(
 ) -> dict[str, np.ndarray]:
     """Run teacher model; return {im_file: (N,5) with cls in 0..len(kept)-1}.
 
-    YOLO/WeDetect/DEFINE use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0). SAM3 does not support
+    YOLO/WeDetect/DFINE use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0). SAM3 does not support
     image batching; prompt chunk size is auto-tuned instead.
 
     ``on_batch`` / ``on_image`` persist predictions (used for cache flush / crash resume). Prefer ``on_batch`` to
@@ -973,9 +973,9 @@ def run_teacher_inference(
         return out
 
     if _is_dfine_ckpt(model_path):
-        from ultralytics import DEFINE
+        from ultralytics import DFINE
 
-        model = DEFINE(model_path)
+        model = DFINE(model_path)
         classes_filter, cls_to_kept = _dfine_teacher_cls_map(model, kept_src_ids, kept_en)
         if not classes_filter:
             LOGGER.warning(

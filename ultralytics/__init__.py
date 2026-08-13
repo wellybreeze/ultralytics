@@ -28,7 +28,7 @@ MODELS = (
     "WeDetect",
     "WeDetectUni",
     "RFDETR",
-    "DEFINE",
+    "DFINE",
 )
 
 __all__ = (  # noqa: PLE0604
@@ -43,7 +43,7 @@ __all__ = (  # noqa: PLE0604
 if TYPE_CHECKING:
     # Enable hints for type checkers
     from ultralytics.models import (
-        DEFINE,
+        DFINE,
         LLM,
         NAS,
         RFDETR,

@@ -543,7 +543,7 @@ def get_flops(model, imgsz=640):
 
     try:
         from ultralytics.nn.modules.block import AAttn, Attention  # imported here: block.py imports this module
-        from ultralytics.nn.modules.define import DFINEDecoder
+        from ultralytics.nn.modules.dfine import DFINEDecoder
         from ultralytics.nn.modules.head import RTDETRDecoder
 
         model = unwrap_model(model)

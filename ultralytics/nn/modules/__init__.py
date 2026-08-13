@@ -82,7 +82,7 @@ from .conv import (
     SpatialAttention,
     freeze_batch_norm2d,
 )
-from .define import DFINEDecoder
+from .dfine import DFINEDecoder
 from .dfine_encoder import DFINERepNCSPELAN4, DFINESCDown
 from .head import (
     OBB,

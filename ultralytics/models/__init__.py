@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from .define import DEFINE
+from .dfine import DFINE
 from .fastsam import FastSAM
 from .llm import LLM
 from .nas import NAS
@@ -8,7 +8,7 @@ from .rtdetr import RTDETR
 from .yolo import YOLO, YOLOE, WeDetect, WeDetectUni, YOLOWorld
 
 __all__ = (
-    "DEFINE",
+    "DFINE",
     "LLM",
     "NAS",
     "RFDETR",

@@ -45,9 +45,14 @@ from ultralytics.nn.modules import (
     Concat,
     Conv,
     Conv2,
+    ConvNeXt,
     ConvTranspose,
+    CSPRepBiFPAN,
     Depth,
     Detect,
+    DFINEDecoder,
+    DFINERepNCSPELAN4,
+    DFINESCDown,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -71,6 +76,7 @@ from ultralytics.nn.modules import (
     Segment26,
     SemanticSegment,
     TorchVision,
+    WeDetectDetect,
     WorldDetect,
     YOLOEDetect,
     YOLOESegment,
@@ -887,6 +893,133 @@ class ClassificationModel(BaseModel):
         return v8ClassificationLoss()
 
 
+class RFDETRDetectionModel(BaseModel):
+    """RF-DETR detection model wrapping the native LWDETR architecture."""
+
+    def __init__(self, cfg="rfdetr-nano.yaml", ch=3, nc=None, verbose=True):
+        """Initialize RF-DETR from an Ultralytics RF-DETR YAML dictionary or path."""
+        super().__init__()
+        from ultralytics.models.rfdetr.build import build_rfdetr_model, rfdetr_class_names
+
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        self.model, self.model_config, class_names = build_rfdetr_model(cfg=self.yaml, nc=nc, verbose=verbose)
+        self.yaml.setdefault("channels", 3)
+        self.names = rfdetr_class_names(self.model_config.num_classes, class_names)
+        self.nc = self.model_config.num_classes
+        block = int(self.model_config.patch_size) * int(self.model_config.num_windows)
+        self.stride = torch.Tensor([block])
+        self.task = "detect"
+        self.inplace = True
+        self.end2end = False
+        if verbose:
+            self.info()
+
+    def forward(self, x, *args, **kwargs):
+        """Run inference for tensors and calculate loss for training batches."""
+        return self.loss(x, *args, **kwargs) if isinstance(x, dict) else self.predict(x, *args, **kwargs)
+
+    def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None):
+        """Run native LWDETR inference."""
+        return self.model(x)
+
+    def fuse(self, verbose=True):
+        """RF-DETR has no Conv+BN fusion; print the Ultralytics model summary when verbose.
+
+        Matches YOLO CLI predict, where ``fuse(verbose=True)`` ends in ``info()`` and emits a line like
+        ``YOLO26n summary (fused): …``.
+        """
+        if verbose:
+            self.info(verbose=verbose)
+        return self
+
+    def is_fused(self, thresh=10):
+        """RF-DETR does not fuse Conv+BN; report fused so exporters / backends skip redundant work."""
+        return True
+
+    def _apply(self, fn):
+        """Apply ``fn`` to parameters/buffers without assuming a Detect() Sequential head."""
+        return super(BaseModel, self)._apply(fn)
+
+    def init_criterion(self):
+        """Build RF-DETR's Hungarian-matching criterion from Ultralytics ``default.yaml`` hyps."""
+        from ultralytics.models.rfdetr.build import build_rfdetr_criterion, sync_rfdetr_model_config
+
+        # Keep criterion on the same device as the live module (ModelConfig.device alone may stay "cpu").
+        device = str(next(self.parameters()).device)
+        if device.startswith("cuda"):
+            device = "cuda"
+        elif device.startswith("mps"):
+            device = "mps"
+        else:
+            device = "cpu"
+        args = getattr(self, "args", None)
+        model_config = sync_rfdetr_model_config(self.model_config, args)
+        if getattr(model_config, "device", None) != device and hasattr(model_config, "model_copy"):
+            model_config = model_config.model_copy(update={"device": device})
+        self.model_config = model_config
+        return build_rfdetr_criterion(model_config, args)
+
+    def loss(self, batch, preds=None):
+        """Adapt an Ultralytics batch into RF-DETR targets and apply official SetCriterion weights.
+
+        Target boxes are YOLO-format normalized ``cxcywh`` (same as official RF-DETR after ``Normalize``).
+        The scalar loss matches ``sum(loss_dict[k] * weight_dict[k])`` used in ``rfdetr`` training_step.
+        """
+        if not hasattr(self, "criterion") or self.criterion is None:
+            self.criterion = self.init_criterion()
+        # Keep matcher group_detr in sync with LWDETR train/eval query count.
+        self.criterion.train(self.training)
+        img = batch["img"]
+        batch_idx = batch["batch_idx"].to(img.device, dtype=torch.long).view(-1)
+        classes = batch["cls"].to(img.device, dtype=torch.long).view(-1)
+        boxes = batch["bboxes"].to(img.device)
+        targets = []
+        for i in range(img.shape[0]):
+            index = batch_idx == i
+            target = {"labels": classes[index], "boxes": boxes[index]}
+            if self.model_config.segmentation_head and "masks" in batch:
+                masks = batch["masks"].to(img.device)
+                if getattr(self, "overlap_mask", False):
+                    count = int(index.sum())
+                    target["masks"] = (masks[i] == torch.arange(1, count + 1, device=img.device).view(-1, 1, 1)).float()
+                else:
+                    target["masks"] = masks[index].float()
+            if self.model_config.use_grouppose_keypoints and "keypoints" in batch:
+                target["keypoints"] = batch["keypoints"].to(img.device)[index]
+            targets.append(target)
+        outputs = preds if preds is not None else self.predict(img)
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        losses = self.criterion(outputs, targets)
+        total = sum(value * self.criterion.weight_dict.get(name, 0.0) for name, value in losses.items())
+        items = torch.stack(
+            [
+                losses.get("loss_giou", total.new_zeros(())),
+                losses.get("loss_ce", total.new_zeros(())),
+                losses.get("loss_bbox", total.new_zeros(())),
+            ]
+        ).detach()
+        return total, items
+
+
+class RFDETRSegmentationModel(RFDETRDetectionModel):
+    """RF-DETR segmentation model wrapping LWDETR with its mask head."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the RF-DETR segmentation wrapper."""
+        super().__init__(*args, **kwargs)
+        self.task = "segment"
+
+
+class RFDETRPoseModel(RFDETRDetectionModel):
+    """RF-DETR pose model wrapping LWDETR with its GroupPose head."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the RF-DETR pose wrapper."""
+        super().__init__(*args, **kwargs)
+        self.task = "pose"
+
+
 class RTDETRDetectionModel(DetectionModel):
     """RTDETR (Real-time DEtection and Tracking using Transformers) Detection Model class.
 
@@ -1070,6 +1203,124 @@ class RTDETRDetectionModel(DetectionModel):
         head = self.model[-1]
         x = head([y[j] for j in head.f], batch)  # head inference
         return x
+
+
+class DFINEDetectionModel(RTDETRDetectionModel):
+    """D-FINE Detection Model using FDR decoder losses (VFL + L1/GIoU + FGL + DDF).
+
+    Reuses ``RTDETRDetectionModel.predict`` (head receives Ultralytics batch for CDN). Only BN parity hooks and
+    ``DFINEDetectionLoss`` differ from RT-DETR.
+    """
+
+    def __init__(self, cfg="dfine-l.yaml", ch=3, nc=None, verbose=True):
+        """Initialize the DFINEDetectionModel with official BN / freeze_norm parity hooks."""
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        # Official D-FINE uses PyTorch BN defaults; Ultralytics initialize_weights sets
+        # eps=1e-3 / momentum=0.03 which breaks numerical parity with converted weights.
+        self._align_official_batchnorm()
+        # L/X (and Objects365 variants) set HGNetv2.freeze_norm=True → FrozenBatchNorm2d.
+        if self.yaml.get("freeze_norm", False):
+            self._freeze_backbone_norm()
+
+    def fuse(self, verbose=True, imgsz=640):
+        """Fuse like official ``DFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
+
+        Official deploy calls ``convert_to_deploy`` on ``ConvNormLayer_fuse`` / ``VGGBlock`` / decoder
+        heads. YAML maps HybridEncoder ``lateral_convs`` to top-level ``Conv(..., act=False)`` layers
+        immediately before ``Upsample``; fuse those only. Do not fuse HGNetv2 / ``input_proj`` Convs
+        (official leaves them unfused). YOLO / RT-DETR ``BaseModel.fuse`` is unchanged.
+        """
+        if not self.is_fused():
+            for m in self.modules():
+                if hasattr(m, "convert_to_deploy"):
+                    m.convert_to_deploy()
+            # Lateral Convs: Identity-act Conv whose next sibling is Upsample (official lateral_convs).
+            for i, m in enumerate(self.model[:-1]):
+                nxt = self.model[i + 1]
+                if not isinstance(m, Conv) or not hasattr(m, "bn"):
+                    continue
+                if not isinstance(m.act, nn.Identity):
+                    continue
+                if not isinstance(nxt, nn.Upsample) and type(nxt).__name__ != "Upsample":
+                    continue
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)
+                delattr(m, "bn")
+                m.forward = m.forward_fuse
+            self._dfine_deployed = True
+            self.info(verbose=verbose, imgsz=imgsz)
+        return self
+
+    def is_fused(self, thresh=10):
+        """Return True after official-style ``convert_to_deploy`` (backbone BN intentionally kept)."""
+        return bool(getattr(self, "_dfine_deployed", False))
+
+    def _align_official_batchnorm(self):
+        """Reset BatchNorm2d hyperparameters to official D-FINE defaults (eps=1e-5, momentum=0.1)."""
+        for m in self.modules():
+            if isinstance(m, torch.nn.BatchNorm2d):
+                m.eps = 1e-5
+                m.momentum = 0.1
+
+    def _freeze_backbone_norm(self):
+        """Replace backbone BatchNorm2d with official FrozenBatchNorm2d (before HybridEncoder)."""
+        from ultralytics.nn.modules.conv import freeze_batch_norm2d
+
+        names = [type(m).__name__ for m in self.model]
+        if "AIFI" not in names:
+            return
+        # Layers before the first encoder input_proj (immediately preceding AIFI).
+        for i in range(names.index("AIFI") - 1):
+            freeze_batch_norm2d(self.model[i])
+
+    def _apply(self, fn):
+        """Apply ``fn`` to parameters/buffers; tolerate missing decoder anchors."""
+        # Call DetectionModel._apply (skip RTDETR's unconditional anchors access).
+        self = DetectionModel._apply(self, fn)
+        m = self.model[-1]
+        if hasattr(m, "anchors") and isinstance(m.anchors, torch.Tensor):
+            m.anchors = fn(m.anchors)
+        if hasattr(m, "valid_mask") and isinstance(m.valid_mask, torch.Tensor):
+            m.valid_mask = fn(m.valid_mask)
+        return self
+
+    def init_criterion(self):
+        """Initialize the D-FINE FDR loss criterion."""
+        from ultralytics.models.utils.dfine_loss import DFINEDetectionLoss
+
+        head = self.model[-1]
+        nc = getattr(self, "nc", None) or self.yaml.get("nc", head.nc)
+        reg_max = getattr(head, "reg_max", 32)
+        return DFINEDetectionLoss(nc=nc, reg_max=reg_max)
+
+    def loss(self, batch, preds=None):
+        """Compute D-FINE losses from the decoder training dict.
+
+        Returns:
+            (torch.Tensor): Total loss value.
+            (torch.Tensor): Main losses ``[loss_giou, loss_vfl, loss_bbox]``.
+        """
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+
+        img = batch["img"]
+        bs = img.shape[0]
+        batch_idx = batch["batch_idx"]
+        targets = {
+            "cls": batch["cls"].to(img.device, dtype=torch.long).view(-1),
+            "bboxes": batch["bboxes"].to(device=img.device),
+            "batch_idx": batch_idx.to(img.device, dtype=torch.long).view(-1),
+            "gt_groups": [(batch_idx == i).sum().item() for i in range(bs)],
+        }
+
+        if preds is None:
+            preds = self.predict(img, batch=targets)
+        if not isinstance(preds, dict):
+            preds = preds[1] if isinstance(preds, (tuple, list)) and len(preds) > 1 else preds
+
+        loss = self.criterion(preds, targets)
+        return sum(loss.values()), torch.as_tensor(
+            [loss[k].detach() for k in ["loss_giou", "loss_vfl", "loss_bbox"]], device=img.device
+        )
 
 
 class WorldModel(DetectionModel):
@@ -1499,6 +1750,516 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
         return super().loss(batch, preds)
 
 
+class WeDetectModel(DetectionModel):
+    """WeDetect open-vocabulary detection model with ConvNeXt + XLM-RoBERTa.
+
+    Unlike WorldModel (which uses YOLO CNN backbone + CLIP), WeDetect uses a ConvNeXt vision backbone and XLM-RoBERTa
+    text encoder. The model is assembled programmatically rather than via ``parse_model`` because the ConvNeXt backbone
+    and CSPRepBiFPAN neck are monolithic modules that do not decompose into individual YOLO-style layers.
+
+    Attributes:
+        txt_feats (torch.Tensor): Cached text feature embeddings.
+        text_model (str): Text model variant string (e.g. "xlm-roberta:base").
+        model_size (str): Model size identifier ("tiny", "base", "large", "xlarge").
+
+    Methods:
+        __init__: Initialize WeDetect model.
+        set_classes: Set classes for offline inference.
+        get_text_pe: Get text positional embeddings.
+        predict: Perform forward pass with text features.
+        loss: Compute loss with text features.
+    """
+
+    def __init__(self, cfg="wedetect-base.yaml", ch=3, nc=None, verbose=True):
+        """Initialize WeDetect model.
+
+        Args:
+            cfg (str | dict): Model config path or dict. Must contain ``model_size`` key.
+            ch (int): Input channels.
+            nc (int, optional): Number of classes.
+            verbose (bool): Whether to display model info.
+        """
+        self.txt_feats = torch.randn(1, nc or 80, 768)
+        self.clip_model = None
+        if isinstance(cfg, dict):
+            self.model_size = cfg.get("model_size", "base")
+            self.yaml = cfg
+        else:
+            from ultralytics.utils import YAML
+            from ultralytics.utils.checks import check_yaml
+
+            yaml_path = check_yaml(cfg)
+            self.yaml = YAML.load(yaml_path)
+            self.model_size = self.yaml.get("model_size", "base")
+        self._resolve_cfg()
+        nc = nc or self.yaml.get("nc", 80)
+        self.yaml["nc"] = nc
+        super(DetectionModel, self).__init__()
+        self.model, self.save = self._build_model(nc, verbose)
+
+        m = self.model[-1]
+        if isinstance(m, WeDetectDetect):
+            s = 256
+            m.inplace = getattr(self, "inplace", False)
+            self.model.eval()
+            m.training = True
+            with torch.no_grad():
+                feats = self.predict(torch.zeros(1, ch, s, s))["feats"]
+            m.stride = torch.tensor([s / x.shape[-2] for x in feats])
+            self.stride = m.stride
+            self.model.train()
+            m.bias_init()
+
+        initialize_weights(self)
+        for name, mod in self.model.named_modules():
+            if isinstance(mod, nn.BatchNorm2d):
+                if name.startswith("2."):
+                    mod.eps = 1e-3
+                    mod.momentum = 0.03
+                else:
+                    mod.eps = 1e-5
+                    mod.momentum = 0.1
+        if verbose:
+            self.info()
+            LOGGER.info("")
+
+    def _resolve_cfg(self):
+        bb = self.yaml.get("backbone", {})
+        nk = self.yaml.get("neck", {})
+        hd = self.yaml.get("head", {})
+        self._arch = {
+            "depths": bb.get("depths", [3, 3, 9, 3]),
+            "dims": bb["dims"],
+            "out_indices": tuple(bb.get("out_indices", [0, 1, 2, 3])),
+            "scale_factor": nk.get("scale_factor", 1.0),
+            "channels_list": nk.get("channels_list", None),
+            "num_repeats": nk.get("num_repeats", None),
+            "embed": hd.get("embed", 768),
+        }
+        self.text_model_variant = self.yaml.get("text_model", "xlm-roberta:base")
+
+    def _build_model(self, nc, verbose):
+        """Build the WeDetect model from config."""
+        cfg = self._arch
+        backbone = ConvNeXt(
+            depths=cfg["depths"],
+            dims=cfg["dims"],
+            out_indices=cfg["out_indices"],
+        )
+        dims = cfg["dims"]
+        sf = cfg["scale_factor"]
+        neck = CSPRepBiFPAN(
+            c2=dims[0],
+            c3=dims[1],
+            c4=dims[2],
+            c5=dims[3],
+            scale_factor=sf,
+            model_size=self.model_size,
+            channels_list=cfg["channels_list"],
+            num_repeats=cfg["num_repeats"],
+        )
+        neck_out_channels = [
+            int(128 * sf),
+            int(256 * sf),
+            int(512 * sf),
+        ]
+        head = WeDetectDetect.from_config(
+            nc=nc,
+            embed=cfg["embed"],
+            with_bn=True,
+            reg_max=16,
+            end2end=False,
+            ch=tuple(neck_out_channels),
+            head_in_channels=[256, 512, 1024],
+        )
+        model = nn.ModuleList([backbone, neck, head])
+        save = []
+        if verbose:
+            LOGGER.info(f"\n{'':>3}WeDetect-{self.model_size} summary: {len(list(model.modules()))} layers")
+        return model, save
+
+    def load(self, weights, verbose=True):
+        """Load vision weights and copy WeDetect text-encoder side-channel weights.
+
+        Extends ``BaseModel.load`` to also transfer ``_text_sd`` (and optional
+        top-level ``text_model_weights``) so open-vocabulary fine-tuning /
+        export initializes XLM-RoBERTa from WeDetect checkpoints rather than
+        a bare HuggingFace backbone.
+        """
+        from copy import deepcopy
+
+        super().load(weights, verbose=verbose)
+        src = weights["model"] if isinstance(weights, dict) else weights
+        text_sd = None
+        if isinstance(weights, dict) and weights.get("text_model_weights"):
+            text_sd = weights["text_model_weights"]
+        if text_sd is None and hasattr(src, "_text_sd") and src._text_sd is not None:
+            text_sd = src._text_sd
+        if text_sd is not None:
+            self._text_sd = deepcopy(text_sd)
+
+    def sync_text_model_weights(self):
+        """Sync live text-encoder weights into ``_text_sd`` for checkpoint I/O.
+
+        Exports ``model.*`` / ``head.*`` keys matching the pretrained
+        ``text_model_weights`` layout so save/load/export share one source of truth.
+        """
+        from copy import deepcopy
+
+        encoder = getattr(self, "text_model", None)
+        if not isinstance(encoder, nn.Module):
+            encoder = getattr(self, "clip_model", None)
+        if not isinstance(encoder, nn.Module):
+            return getattr(self, "_text_sd", None)
+        sd = {}
+        if hasattr(encoder, "model"):
+            sd.update({f"model.{k}": v.detach().float().cpu() for k, v in encoder.model.state_dict().items()})
+        if hasattr(encoder, "head"):
+            sd.update({f"head.{k}": v.detach().float().cpu() for k, v in encoder.head.state_dict().items()})
+        if sd:
+            self._text_sd = deepcopy(sd)
+        return self._text_sd
+
+    def set_classes(self, text, batch=80, cache_clip_model=True):
+        """Set classes for offline inference.
+
+        Args:
+            text (list[str]): List of class names.
+            batch (int): Batch size for text encoding.
+            cache_clip_model (bool): Whether to cache the text model.
+        """
+        self.txt_feats = self.get_text_pe(text, batch=batch, cache_text_model=cache_clip_model)
+        self.model[-1].nc = len(text)
+
+    def ensure_text_model(self):
+        """Build and attach the text encoder if it is not already loaded."""
+        from ultralytics.nn.text_model import build_text_model
+
+        existing = getattr(self, "text_model", None)
+        if isinstance(existing, nn.Module) or getattr(self, "clip_model", None) is not None:
+            return
+        device = next(self.model.parameters()).device
+        text_sd = getattr(self, "_text_sd", None)
+        self.clip_model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
+
+    def register_text_model(self):
+        """Register the text encoder as a submodule so its parameters participate in training.
+
+        When the text encoder is registered via ``add_module``, its parameters
+        appear in ``model.parameters()`` and can be updated by the optimizer.
+        This is required for open-vocabulary fine-tuning where the text encoder
+        is updated with a reduced learning rate (``text_lr_mult``).
+
+        The text encoder is registered under the name ``text_model`` (not
+        ``clip_model``) so that optimizer parameter groups can reliably match
+        text-encoder parameters by the ``text_model.`` prefix.
+        """
+        self.ensure_text_model()
+        clip = getattr(self, "clip_model", None)
+        if clip is None:
+            return getattr(self, "text_model", None)
+        # Avoid treating a previously registered Module as missing; only skip if already a Module
+        existing = getattr(self, "text_model", None)
+        if isinstance(existing, nn.Module):
+            return existing
+        del self.clip_model
+        self.add_module("text_model", clip)
+        self.text_model.train()
+        for p in self.text_model.parameters():
+            p.requires_grad = True
+        return self.text_model
+
+    def encode_texts(self, texts):
+        """Encode nested batch texts online through the registered text encoder.
+
+        Args:
+            texts (list[list[str]]): Per-image class text lists from ``RandomLoadText``.
+
+        Returns:
+            (torch.Tensor): Text features of shape ``(batch, num_classes, embed_dim)``.
+        """
+        text_encoder = getattr(self, "text_model", None)
+        if not isinstance(text_encoder, nn.Module):
+            text_encoder = self.register_text_model()
+        if text_encoder is None:
+            self.ensure_text_model()
+            text_encoder = getattr(self, "text_model", None) or self.clip_model
+        txt_feats = text_encoder.encode_text(texts)  # (1, B*N, D)
+        b = len(texts)
+        return txt_feats.reshape(b, -1, txt_feats.shape[-1])
+
+    def get_text_pe(self, text, batch=80, cache_text_model=True):
+        """Get text positional embeddings using XLM-RoBERTa.
+
+        Args:
+            text (list[str]): List of class names.
+            batch (int): Batch size for text encoding.
+            cache_text_model (bool): Whether to cache the text model.
+
+        Returns:
+            (torch.Tensor): Text positional embeddings, shape (1, num_classes, embed_dim).
+        """
+        from ultralytics.nn.text_model import build_text_model
+
+        device = next(self.model.parameters()).device
+        text_sd = getattr(self, "_text_sd", None)
+        cached = getattr(self, "text_model", None) if isinstance(getattr(self, "text_model", None), nn.Module) else None
+        cached = cached or getattr(self, "clip_model", None)
+        if cached is not None:
+            model = cached
+        elif cache_text_model:
+            self.clip_model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
+            model = self.clip_model
+        else:
+            model = build_text_model(self.text_model_variant, device=device, state_dict=text_sd)
+        # Match training / original test LoadText: only the requested class prompts (no extra slot)
+        all_texts = list(text)
+        was_training = model.training
+        model.eval()
+        try:
+            txt_feats = model.encode_text([all_texts])
+        finally:
+            if was_training:
+                model.train()
+        return txt_feats.reshape(-1, len(all_texts), txt_feats.shape[-1])
+
+    def predict(self, x, profile=False, visualize=False, txt_feats=None, augment=False, embed=None):
+        """Perform a forward pass through the model.
+
+        Args:
+            x (torch.Tensor): Input image tensor.
+            txt_feats (torch.Tensor, optional): Text features.
+            augment (bool): If True, perform data augmentation.
+            embed (list, optional): Layer indices for embedding extraction.
+
+        Returns:
+            (torch.Tensor): Model output.
+        """
+        txt_feats = (self.txt_feats if txt_feats is None else txt_feats).to(device=x.device, dtype=x.dtype)
+        if txt_feats.shape[0] != x.shape[0] or self.model[-1].export:
+            txt_feats = txt_feats.expand(x.shape[0], -1, -1)
+
+        backbone_out = self.model[0](x)
+        neck_out = self.model[1](backbone_out)
+        x = self.model[2](neck_out, txt_feats)
+        return x
+
+    def loss(self, batch, preds=None):
+        """Compute loss.
+
+        When ``txt_feats`` is absent but ``texts`` is present (open-vocabulary
+        fine-tuning), text features are encoded online so gradients update the
+        language model. Encoding runs inside ``loss`` (called via DDP forward)
+        so DistributedDataParallel correctly tracks text-encoder parameters.
+
+        Args:
+            batch (dict): Batch to compute loss on.
+            preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
+        """
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+        if preds is None:
+            txt_feats = batch.get("txt_feats")
+            if txt_feats is None and batch.get("texts") is not None:
+                txt_feats = self.encode_texts(batch["texts"])
+                batch["txt_feats"] = txt_feats
+            preds = self.forward(batch["img"], txt_feats=txt_feats)
+        # OV batches: scores width == len(texts) (e.g. 80), which may exceed data nc
+        # (e.g. nc=1 with expanded negative vocabulary). TAL scatter requires matching.
+        out = preds[1] if isinstance(preds, tuple) else preds
+        if isinstance(out, dict) and "scores" in out:
+            ncls = int(out["scores"].shape[1])
+            if getattr(self.criterion, "nc", None) != ncls:
+                self.criterion.nc = ncls
+                self.criterion.assigner.num_classes = ncls
+                self.model[-1].nc = ncls
+        return self.criterion(preds, batch)
+
+
+class WeDetectUniModel(DetectionModel):
+    """WeDetect-Uni unified detection model with learnable prompt embeddings.
+
+    Unlike WeDetectModel (which uses XLM-RoBERTa text encoder), WeDetectUniModel uses learnable ``embeddings``
+    parameters as text features, eliminating the need for a text encoder at inference time.
+
+    Attributes:
+        embeddings (nn.Parameter): Learnable prompt embeddings, shape (num_prompts, prompt_dim).
+        model_size (str): Model size identifier ("tiny", "base", "large", "xlarge").
+
+    Methods:
+        __init__: Initialize WeDetect-Uni model.
+        predict: Perform forward pass with learnable embeddings.
+        loss: Compute loss with learnable embeddings.
+    """
+
+    def __init__(self, cfg="wedetect-uni-base.yaml", ch=3, nc=None, verbose=True):
+        self.clip_model = None
+        if isinstance(cfg, dict):
+            self.model_size = cfg.get("model_size", "base")
+            self.yaml = cfg
+        else:
+            from ultralytics.utils import YAML
+            from ultralytics.utils.checks import check_yaml
+
+            yaml_path = check_yaml(cfg)
+            self.yaml = YAML.load(yaml_path)
+            self.model_size = self.yaml.get("model_size", "base")
+        self._resolve_cfg()
+        nc = nc or self.yaml.get("nc", 80)
+        self.yaml["nc"] = nc
+        super(DetectionModel, self).__init__()
+        self.model, self.save = self._build_model(nc, verbose)
+
+        num_prompts = self.yaml.get("num_prompts", nc)
+        prompt_dim = self.yaml.get("prompt_dim", self._arch["embed"])
+        self.embeddings = nn.Parameter(torch.randn(num_prompts, prompt_dim))
+
+        m = self.model[-1]
+        if isinstance(m, WeDetectDetect):
+            s = 256
+            m.inplace = getattr(self, "inplace", False)
+            self.model.eval()
+            m.training = True
+            with torch.no_grad():
+                txt_feats = self.embeddings[None].expand(1, -1, -1)
+                feats = self.predict(torch.zeros(1, ch, s, s), txt_feats=txt_feats)["feats"]
+            m.stride = torch.tensor([s / x.shape[-2] for x in feats])
+            self.stride = m.stride
+            self.model.train()
+            m.bias_init()
+
+        initialize_weights(self)
+        for name, mod in self.model.named_modules():
+            if isinstance(mod, nn.BatchNorm2d):
+                if name.startswith("2."):
+                    mod.eps = 1e-3
+                    mod.momentum = 0.03
+                else:
+                    mod.eps = 1e-5
+                    mod.momentum = 0.1
+        if verbose:
+            self.info()
+            LOGGER.info("")
+
+    def _resolve_cfg(self):
+        bb = self.yaml.get("backbone", {})
+        nk = self.yaml.get("neck", {})
+        hd = self.yaml.get("head", {})
+        self._arch = {
+            "depths": bb.get("depths", [3, 3, 9, 3]),
+            "dims": bb["dims"],
+            "out_indices": tuple(bb.get("out_indices", [0, 1, 2, 3])),
+            "scale_factor": nk.get("scale_factor", 1.0),
+            "channels_list": nk.get("channels_list", None),
+            "num_repeats": nk.get("num_repeats", None),
+            "embed": hd.get("embed", 768),
+        }
+
+    def _build_model(self, nc, verbose):
+        cfg = self._arch
+        backbone = ConvNeXt(
+            depths=cfg["depths"],
+            dims=cfg["dims"],
+            out_indices=cfg["out_indices"],
+        )
+        dims = cfg["dims"]
+        sf = cfg["scale_factor"]
+        neck = CSPRepBiFPAN(
+            c2=dims[0],
+            c3=dims[1],
+            c4=dims[2],
+            c5=dims[3],
+            scale_factor=sf,
+            model_size=self.model_size,
+            channels_list=cfg["channels_list"],
+            num_repeats=cfg["num_repeats"],
+        )
+        neck_out_channels = [
+            int(128 * sf),
+            int(256 * sf),
+            int(512 * sf),
+        ]
+        head = WeDetectDetect.from_config(
+            nc=nc,
+            embed=cfg["embed"],
+            with_bn=True,
+            reg_max=16,
+            end2end=False,
+            ch=tuple(neck_out_channels),
+            head_in_channels=[256, 512, 1024],
+        )
+        model = nn.ModuleList([backbone, neck, head])
+        save = []
+        if verbose:
+            LOGGER.info(f"\n{'':>3}WeDetect-Uni-{self.model_size} summary: {len(list(model.modules()))} layers")
+        return model, save
+
+    def predict(self, x, profile=False, visualize=False, txt_feats=None, augment=False, embed=None):
+        if txt_feats is None:
+            txt_feats = self.embeddings[None]
+            txt_feats = txt_feats.expand(x.shape[0], -1, -1)
+        txt_feats = txt_feats.to(device=x.device, dtype=x.dtype)
+
+        backbone_out = self.model[0](x)
+        neck_out = self.model[1](backbone_out)
+        x = self.model[2](neck_out, txt_feats)
+        return x
+
+    @smart_inference_mode()
+    def get_text_pe(self, text, batch=80, cache_text_model=True):
+        """Get text positional embeddings using XLM-RoBERTa.
+
+        Used by :class:`WeDetectUniTrainer` to generate initial text
+        embeddings for ``self.embeddings`` initialization.  The embeddings
+        are then used directly as learnable parameters (no fuse operation).
+
+        Args:
+            text (list[str]): List of class names.
+            batch (int): Batch size for text encoding.
+            cache_text_model (bool): Whether to cache the text model.
+
+        Returns:
+            (torch.Tensor): Text positional embeddings, shape (1, num_classes, embed_dim).
+        """
+        from ultralytics.nn.text_model import build_text_model
+
+        device = next(self.model.parameters()).device
+        text_sd = getattr(self, "_text_sd", None)
+        text_model_variant = self.yaml.get("text_model", "xlm-roberta:base")
+        if not getattr(self, "clip_model", None) and cache_text_model:
+            self.clip_model = build_text_model(text_model_variant, device=device, state_dict=text_sd)
+        model = (
+            self.clip_model
+            if cache_text_model
+            else build_text_model(text_model_variant, device=device, state_dict=text_sd)
+        )
+        txt_feats = model.encode_text([text])
+        return txt_feats.reshape(-1, len(text), txt_feats.shape[-1])
+
+    def set_classes(self, names, embeddings):
+        """Set classes for the prompt-free model.
+
+        Stores the text prompt embeddings as ``self.pe`` and updates the
+        head's ``nc`` to match the number of classes.
+
+        Args:
+            names (list[str]): List of class names.
+            embeddings (torch.Tensor): Text prompt embeddings, shape (1, nc, embed_dim).
+        """
+        assert embeddings.ndim == 3
+        self.pe = embeddings
+        self.model[-1].nc = len(names)
+        self.names = check_class_names(names)
+
+    def loss(self, batch, preds=None):
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+        if preds is None:
+            txt_feats = self.embeddings[None].expand(batch["img"].shape[0], -1, -1)
+            preds = self.forward(batch["img"], txt_feats=txt_feats)
+        return self.criterion(preds, batch)
+
+
 class Ensemble(torch.nn.ModuleList):
     """Ensemble of models.
 
@@ -1918,6 +2679,12 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
     if not hasattr(model, "stride"):
         model.stride = torch.tensor([32.0])
 
+    # WeDetect: restore text-encoder side-channel if missing on the pickled module
+    if getattr(model, "_text_sd", None) is None and ckpt.get("text_model_weights"):
+        from copy import deepcopy
+
+        model._text_sd = deepcopy(ckpt["text_model_weights"])
+
     model = (model.fuse() if fuse and hasattr(model, "fuse") else model).eval().to(device)  # model in eval mode
 
     # Module updates
@@ -1990,6 +2757,7 @@ def parse_model(d, ch, verbose=True):
             C2f,
             C3k2,
             RepNCSPELAN4,
+            DFINERepNCSPELAN4,
             ELAN1,
             ADown,
             AConv,
@@ -2004,6 +2772,7 @@ def parse_model(d, ch, verbose=True):
             RepC3,
             PSA,
             SCDown,
+            DFINESCDown,
             C2fCIB,
             A2C2f,
         }
@@ -2107,7 +2876,7 @@ def parse_model(d, ch, verbose=True):
             args.append([ch[x] for x in f])
         elif m is ImagePoolingAttn:
             args.insert(1, [ch[x] for x in f])  # channels as second arg
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m in frozenset({RTDETRDecoder, DFINEDecoder}):  # channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         elif m is CBLinear:
             c2 = args[0]
@@ -2151,12 +2920,60 @@ def yaml_model_load(path):
         LOGGER.warning(f"Ultralytics YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
         path = path.with_name(new_stem + path.suffix)
 
+    # RF-DETR: rfdetr-nano.yaml -> rfdetr.yaml; rfdetr-seg-small.yaml -> rfdetr-seg.yaml
+    if "rfdetr" in path.stem.lower() or "rf-detr" in path.stem.lower():
+        unified_path = str(unify_rfdetr_yaml_path(path))
+        yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
+        d = YAML.load(yaml_file)  # model dict
+        d["scale"] = guess_rfdetr_scale(path)
+        d["yaml_file"] = str(path)
+        return d
+
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = YAML.load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
     return d
+
+
+def unify_rfdetr_yaml_path(path):
+    """Map a size-specific RF-DETR YAML path onto its per-task unified file.
+
+    Examples:
+        rfdetr-nano.yaml -> rfdetr.yaml
+        rfdetr-seg-medium.yaml -> rfdetr-seg.yaml
+        rfdetr-pose-preview.yaml -> rfdetr-pose.yaml
+    """
+    path = Path(path)
+    stem = path.stem.lower().replace("_", "-")
+    if "seg" in stem:
+        name = "rfdetr-seg"
+    elif "pose" in stem or "keypoint" in stem:
+        name = "rfdetr-pose"
+    else:
+        name = "rfdetr"
+    return path.with_name(name + path.suffix)
+
+
+def guess_rfdetr_scale(model_path):
+    """Extract the RF-DETR size variant from a model path (analogous to guess_model_scale for YOLO).
+
+    Args:
+        model_path (str | Path): Path such as ``rfdetr-nano.yaml`` or ``rfdetr-seg-large.pt``.
+
+    Returns:
+        (str): Scale key (nano/small/medium/large/xlarge/2xlarge/preview), or empty string if not found.
+    """
+    stem = Path(model_path).stem.lower().replace("_", "-")
+    for scale in ("keypoint-preview", "2xlarge", "xxlarge", "xlarge", "medium", "small", "large", "nano", "preview"):
+        if scale in stem:
+            if scale == "xxlarge":
+                return "2xlarge"
+            if scale in {"keypoint-preview", "preview"}:
+                return "preview"
+            return scale
+    return ""
 
 
 def guess_model_scale(model_path):
@@ -2185,7 +3002,7 @@ def guess_model_task(model):
     """
 
     def cfg2task(cfg):
-        """Guess from YAML dictionary."""
+        """Guess from YAML dictionary via the final head module name (YOLO architecture YAMLs)."""
         m = cfg["head"][-1][-2].lower()  # output module name
         if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
@@ -2206,6 +3023,9 @@ def guess_model_task(model):
     if isinstance(model, dict):
         with contextlib.suppress(Exception):
             return cfg2task(model)
+        # Architecture-free YAMLs (no backbone/head graph): reuse filename cues via yaml_file
+        with contextlib.suppress(Exception):
+            return guess_model_task(model["yaml_file"])
     # Guess from PyTorch model
     if isinstance(model, torch.nn.Module):  # PyTorch model
         for x in "model.args", "model.model.args", "model.model.model.args":
@@ -2227,7 +3047,7 @@ def guess_model_task(model):
                 return "obb"
             elif isinstance(m, Depth):
                 return "depth"
-            elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, v10Detect)):
+            elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, WeDetectDetect, v10Detect)):
                 return "detect"
 
     # Guess from model filename

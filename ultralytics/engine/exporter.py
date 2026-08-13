@@ -89,6 +89,7 @@ from ultralytics.nn.modules import (
     Classify,
     Depth,
     Detect,
+    DFINEDecoder,
     Pose,
     Pose26,
     RTDETRDecoder,
@@ -96,7 +97,17 @@ from ultralytics.nn.modules import (
     Segment26,
     SemanticSegment,
 )
-from ultralytics.nn.tasks import ClassificationModel, DepthModel, DetectionModel, SegmentationModel, WorldModel
+
+# DETR-style decoders share export / NMS constraints (end2end, opset, max_det clamp).
+_DETR_DECODERS = (RTDETRDecoder, DFINEDecoder)
+from ultralytics.nn.tasks import (
+    ClassificationModel,
+    DepthModel,
+    DetectionModel,
+    SegmentationModel,
+    WeDetectModel,
+    WorldModel,
+)
 from ultralytics.utils import (
     ARM64,
     DEFAULT_CFG,
@@ -178,7 +189,18 @@ def export_formats():
             ".engine",
             False,
             True,
-            ["batch", "data", "dynamic", "quantize", "opset", "simplify", "workspace", "nms", "fraction"],
+            [
+                "batch",
+                "data",
+                "dynamic",
+                "quantize",
+                "opset",
+                "simplify",
+                "workspace",
+                "nms",
+                "fraction",
+                "builder_optimization_level",
+            ],
             "base",
         ],
         ["CoreML", "coreml", ".mlpackage", True, False, ["batch", "dynamic", "quantize", "nms"], "coreml"],
@@ -762,7 +784,7 @@ class Exporter:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not is_tf_format or TORCH_1_13, "TensorFlow exports with NMS require torch>=1.13"
             assert fmt != "onnx" or TORCH_1_13, "ONNX export with NMS requires torch>=1.13"
-            if getattr(model, "end2end", False) or isinstance(model.model[-1], RTDETRDecoder):
+            if getattr(model, "end2end", False) or isinstance(model.model[-1], _DETR_DECODERS):
                 LOGGER.warning("'nms=True' is not available for end2end models. Forcing 'nms=False'.")
                 self.args.nms = False
             self.args.conf = self.args.conf or 0.25  # set conf default value for nms export
@@ -780,8 +802,8 @@ class Exporter:
                 assert not self.args.nms, (
                     "'nms=True' cannot be used together with 'dynamic=True' for CoreML export. Please disable one of them."
                 )
-                assert model.task != "classify" and not isinstance(model.model[-1], RTDETRDecoder), (
-                    "'dynamic=True' is not supported for CoreML classification or RT-DETR models."
+                assert model.task != "classify" and not isinstance(model.model[-1], _DETR_DECODERS), (
+                    "'dynamic=True' is not supported for CoreML classification or RT-DETR/D-FINE models."
                 )
         if (fmt in {"engine", "coreml"} or self.args.nms) and self.args.dynamic and self.args.batch == 1:
             LOGGER.warning(
@@ -803,6 +825,40 @@ class Exporter:
                 "See https://docs.ultralytics.com/models/yolo-world for details."
             )
             model.clip_model = None  # openvino int8 export error: https://github.com/ultralytics/ultralytics/pull/18445
+
+        # WeDetect dual-tower dynamic open-vocabulary ONNX / TensorRT / TorchScript export
+        if isinstance(model, WeDetectModel) and fmt in {"onnx", "engine", "torchscript"}:
+            export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
+            if fmt == "engine" and export_mode != "dual":
+                raise ValueError(
+                    "WeDetect TensorRT export only supports export_mode='dual' "
+                    f"(got '{export_mode}'). Use format='onnx' for whole graphs."
+                )
+            if fmt == "torchscript" and export_mode != "dual":
+                raise ValueError(
+                    "WeDetect TorchScript export only supports export_mode='dual' "
+                    f"(got '{export_mode}') so open-vocabulary prompts stay swappable."
+                )
+            if export_mode in {"dual", "whole"}:
+                self.file = Path(
+                    getattr(model, "pt_path", None)
+                    or getattr(model, "yaml_file", None)
+                    or model.yaml.get("yaml_file", "")
+                )
+                if self.file.suffix in {".yaml", ".yml"}:
+                    self.file = Path(self.file.name)
+                self.imgsz = check_imgsz(self.args.imgsz, stride=model.stride, min_dim=2)
+                self.model = model
+                self.run_callbacks("on_export_start")
+                if fmt == "engine":
+                    f = self.export_wedetect_engine()
+                elif fmt == "torchscript":
+                    f = self.export_wedetect_torchscript()
+                else:
+                    f = self.export_wedetect_onnx()
+                self.run_callbacks("on_export_end")
+                return str(f)
+
         if self.args.quantize in {8, "w8a16"} and not self.args.data:
             self.args.data = DEFAULT_CFG.data or TASK2DATA[getattr(model, "task", "detect")]  # assign default data
             LOGGER.warning(
@@ -856,14 +912,14 @@ class Exporter:
                     m.bake_argmax = check_version(f"tensorrt-cu{cuda_major}", ">=10.0.0") or check_version(
                         "tensorrt", ">=10.0.0"
                     )
-            if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
+            if isinstance(m, (Detect, *_DETR_DECODERS)):  # includes Detect subclasses + DETR decoders
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
                 # Clamp max_det to available queries/anchors (required for TensorRT compatibility)
                 available = (
                     m.num_queries
-                    if isinstance(m, RTDETRDecoder)
+                    if isinstance(m, _DETR_DECODERS)
                     else sum(int(self.imgsz[0] / s) * int(self.imgsz[1] / s) for s in model.stride.tolist())
                 )
                 m.max_det = min(self.args.max_det, available)
@@ -1039,7 +1095,9 @@ class Exporter:
         from ultralytics.utils.export.engine import best_onnx_opset, torch2onnx
 
         opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type, quantize=self.args.quantize)
-        assert not isinstance(self.model.model[-1], RTDETRDecoder) or opset >= 16, "RTDETR export requires opset>=16"
+        assert not isinstance(self.model.model[-1], _DETR_DECODERS) or opset >= 16, (
+            "RTDETR/DFINE export requires opset>=16"
+        )
         LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset}...")
         if self.args.nms:
             assert TORCH_1_13, f"'nms=True' ONNX export requires torch>=1.13 (found torch=={TORCH_VERSION})"
@@ -1155,7 +1213,110 @@ class Exporter:
         return f
 
     @try_export
-    def export_openvino(self, prefix=colorstr("OpenVINO:")):  # noqa: B008
+    def export_wedetect_onnx(self, prefix=colorstr("WeDetect ONNX:")):
+        """Export WeDetect dual-tower (or whole) ONNX graphs for dynamic open-vocabulary inference."""
+        requirements = ["onnx>=1.12.0,<2.0.0"]
+        if self.args.simplify:
+            ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
+            requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
+        check_requirements(requirements)
+        import onnx
+
+        from ultralytics.utils.export.engine import best_onnx_opset
+        from ultralytics.utils.export.wedetect import export_wedetect_onnx
+
+        opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type)
+        opset = max(int(opset), 17)  # align with original WeDetect deploy default
+        export_mode = str(getattr(self.args, "export_mode", None) or "dual").lower()
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        if self.args.nms:
+            self.args.conf = self.args.conf or 0.25
+        paths = export_wedetect_onnx(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            export_mode=export_mode,
+            opset=opset,
+            simplify=bool(self.args.simplify),
+            device=self.device,
+            prefix=prefix,
+            nms=bool(self.args.nms),
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf or 0.25),
+            iou=float(self.args.iou),
+            max_classes=int(self.args.max_classes),
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
+
+    @try_export
+    def export_wedetect_torchscript(self, prefix=colorstr("WeDetect TorchScript:")):
+        """Export WeDetect dual TorchScript towers (language + vision, optional in-graph NMS)."""
+        from ultralytics.utils.export.wedetect import export_wedetect_torchscript
+
+        nms = bool(self.args.nms)
+        if nms:
+            self.args.conf = self.args.conf or 0.25
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        paths = export_wedetect_torchscript(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            device=self.device,
+            nms=nms,
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf or 0.25),
+            iou=float(self.args.iou),
+            max_classes=int(self.args.max_classes),
+            prefix=prefix,
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
+
+    @try_export
+    def export_wedetect_engine(self, prefix=colorstr("WeDetect TensorRT:")):
+        """Export WeDetect dual ONNX towers then convert each to a TensorRT engine."""
+        requirements = ["onnx>=1.12.0,<2.0.0"]
+        if self.args.simplify:
+            ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
+            requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
+        check_requirements(requirements)
+        import onnx
+
+        from ultralytics.utils.export.engine import best_onnx_opset
+        from ultralytics.utils.export.wedetect import export_wedetect_engine
+
+        if self.args.quantize == 8:
+            raise ValueError(
+                "WeDetect dual TensorRT INT8 export is not supported; use quantize=16 (FP16) or omit for FP32."
+            )
+        opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type)
+        opset = max(int(opset), 17)
+        imgsz = self.imgsz[0] if self.imgsz[0] == self.imgsz[1] else tuple(self.imgsz)
+        max_classes = int(self.args.max_classes)
+        paths = export_wedetect_engine(
+            self.model,
+            self.file,
+            imgsz=imgsz,
+            opset=opset,
+            simplify=bool(self.args.simplify),
+            device=self.device,
+            workspace=self.args.workspace,
+            quantize=self.args.quantize,
+            builder_optimization_level=self.args.builder_optimization_level,
+            max_classes=max_classes,
+            nms=bool(self.args.nms),
+            max_det=int(self.args.max_det),
+            conf=float(self.args.conf),
+            iou=float(self.args.iou),
+            verbose=bool(self.args.verbose),
+            prefix=prefix,
+        )
+        LOGGER.info(f"{prefix} exported {len(paths)} file(s): {', '.join(paths)}")
+        return paths[0]
+
+    @try_export
+    def export_openvino(self, prefix=colorstr("OpenVINO:")):
         """Export YOLO model to OpenVINO format."""
         from ultralytics.utils.export.openvino import torch2openvino
 
@@ -1374,6 +1535,7 @@ class Exporter:
             metadata=self.metadata,
             verbose=self.args.verbose,
             prefix=prefix,
+            builder_optimization_level=self.args.builder_optimization_level,
         )
 
         return f
@@ -1402,9 +1564,9 @@ class Exporter:
             )
 
         # Export to ONNX
-        if isinstance(self.model.model[-1], RTDETRDecoder):
+        if isinstance(self.model.model[-1], _DETR_DECODERS):
             self.args.opset = self.args.opset or 19
-            assert self.args.opset <= 19, "RTDETR TensorFlow export requires opset<=19"
+            assert 16 <= self.args.opset <= 19, "RTDETR/DFINE TensorFlow export requires opset>=16;<=19"
         self.args.simplify = True
         f_onnx = self.export_onnx()  # ensure ONNX is available
         keras_model = onnx2saved_model(

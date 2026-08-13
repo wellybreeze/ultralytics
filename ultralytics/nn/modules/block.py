@@ -108,20 +108,21 @@ class HGStem(nn.Module):
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
     """
 
-    def __init__(self, c1: int, cm: int, c2: int):
+    def __init__(self, c1: int, cm: int, c2: int, use_lab: bool = False):
         """Initialize the StemBlock of PPHGNetV2.
 
         Args:
             c1 (int): Input channels.
             cm (int): Middle channels.
             c2 (int): Output channels.
+            use_lab (bool): Enable D-FINE LearnableAffineBlock after each stem activation.
         """
         super().__init__()
-        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU())
-        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU())
-        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU())
-        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU())
-        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU())
+        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU(), use_lab=use_lab)
+        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU(), use_lab=use_lab)
+        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU(), use_lab=use_lab)
+        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU(), use_lab=use_lab)
+        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU(), use_lab=use_lab)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=1, padding=0, ceil_mode=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -153,6 +154,7 @@ class HGBlock(nn.Module):
         n: int = 6,
         lightconv: bool = False,
         shortcut: bool = False,
+        use_lab: bool = False,
         act: nn.Module | None = None,
     ):
         """Initialize HGBlock with specified parameters.
@@ -165,14 +167,15 @@ class HGBlock(nn.Module):
             n (int): Number of LightConv or Conv blocks.
             lightconv (bool): Whether to use LightConv.
             shortcut (bool): Whether to use shortcut connection.
+            use_lab (bool): Enable D-FINE LearnableAffineBlock (N/S/M backbones).
             act (nn.Module): Activation function.
         """
         super().__init__()
         act = nn.ReLU() if act is None else act
         block = LightConv if lightconv else Conv
-        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act) for i in range(n))
-        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act)  # squeeze conv
-        self.ec = Conv(c2 // 2, c2, 1, 1, act=act)  # excitation conv
+        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act, use_lab=use_lab) for i in range(n))
+        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act, use_lab=use_lab)  # squeeze conv
+        self.ec = Conv(c2 // 2, c2, 1, 1, act=act, use_lab=use_lab)  # excitation conv
         self.add = shortcut and c1 == c2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -2073,3 +2076,365 @@ class RealNVP(nn.Module):
             self.float()
         z, log_det = self.backward_p(x)
         return self.prior.log_prob(z) + log_det
+
+
+class _DropPath(nn.Module):
+    """Stochastic depth (same keep-scaling as timm DropPath). Used by ConvNeXt; no timm import."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+        if keep_prob > 0.0:
+            random_tensor.div_(keep_prob)
+        return x * random_tensor
+
+
+class ConvNeXtBlock(nn.Module):
+    """ConvNeXt residual block.
+
+    Paper: `A ConvNet for the 2020s` - https://arxiv.org/pdf/2201.03545.pdf
+
+    Args:
+        dim (int): Number of input channels.
+        drop_path (float): Stochastic depth rate. Default: 0.0.
+        layer_scale_init_value (float): Initial value of layer scale. Default: 1e-6.
+    """
+
+    def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, 4 * dim)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = (
+            nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
+            if layer_scale_init_value > 0
+            else None
+        )
+        self.drop_path = _DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x):
+        identity = x
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 3, 1, 2)
+        return identity + self.drop_path(x)
+
+
+class ConvNeXt(nn.Module):
+    """ConvNeXt backbone producing multi-scale feature maps.
+
+    Returns a tuple of feature maps from each stage. When ``out_indices`` is set, only the specified stages are
+    returned.
+
+    Args:
+        depths (list[int]): Number of blocks per stage.
+        dims (list[int]): Feature dimension per stage.
+        in_chans (int): Input image channels. Default: 3.
+        drop_path_rate (float): Stochastic depth rate. Default: 0.0.
+        layer_scale_init_value (float): Layer scale init. Default: 1e-6.
+        out_indices (tuple[int]): Which stage outputs to return. Default: (0, 1, 2, 3).
+    """
+
+    def __init__(
+        self,
+        depths=(3, 3, 9, 3),
+        dims=(96, 192, 384, 768),
+        in_chans=3,
+        drop_path_rate=0.0,
+        layer_scale_init_value=1e-6,
+        out_indices=(0, 1, 2, 3),
+    ):
+        super().__init__()
+        self.out_indices = out_indices
+        self.downsample_layers = nn.ModuleList()
+        stem = nn.Sequential(
+            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
+            nn.LayerNorm(dims[0], eps=1e-6, elementwise_affine=True)
+            if False
+            else _ConvNeXtChannelNorm(dims[0], eps=1e-6),
+        )
+        self.downsample_layers.append(stem)
+        for i in range(3):
+            self.downsample_layers.append(
+                nn.Sequential(
+                    _ConvNeXtChannelNorm(dims[i], eps=1e-6),
+                    nn.Conv2d(dims[i], dims[i + 1], kernel_size=2, stride=2),
+                )
+            )
+
+        self.stages = nn.ModuleList()
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        cur = 0
+        for i in range(4):
+            self.stages.append(
+                nn.Sequential(
+                    *[
+                        ConvNeXtBlock(
+                            dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value
+                        )
+                        for j in range(depths[i])
+                    ]
+                )
+            )
+            cur += depths[i]
+
+    def forward(self, x):
+        """Forward pass returning multi-scale features.
+
+        Returns:
+            (tuple[Tensor]): Feature maps at the stages specified by ``out_indices``.
+        """
+        outs = []
+        for i in range(4):
+            x = self.downsample_layers[i](x)
+            x = self.stages[i](x)
+            if i in self.out_indices:
+                outs.append(x)
+        return tuple(outs)
+
+
+class _ConvNeXtChannelNorm(nn.Module):
+    """LayerNorm operating on channels-first (B, C, H, W) tensors."""
+
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        return self.weight[:, None, None] * x + self.bias[:, None, None]
+
+
+class CSPRepBiFPAN(nn.Module):
+    """CSP Reparameterised Bi-directional Feature Pyramid Network neck.
+
+    Uses BiFusion modules for bi-directional feature fusion combined with BepC3 blocks for feature extraction.
+
+    Args:
+        c2 (int): Channels for P2 level features from backbone.
+        c3 (int): Channels for P3 level features from backbone.
+        c4 (int): Channels for P4 level features from backbone.
+        c5 (int): Channels for P5 level features from backbone.
+        scale_factor (float): Channel scaling factor. Default: 0.75.
+        model_size (str): Model size, one of 'tiny', 'base', 'large', 'xlarge'. Default: 'base'.
+        channels_list (list[int] | None): Override the default channel list. Default: None.
+        num_repeats (list[int] | None): Override the default repeat list. Default: None.
+    """
+
+    _size_repeats = {
+        "tiny": [1, 6, 12, 18, 6, 6, 6, 6, 6],
+        "base": [1, 6, 12, 18, 6, 12, 12, 12, 12],
+        "large": [1, 6, 12, 18, 6, 12, 12, 12, 12],
+        "xlarge": [1, 6, 12, 18, 6, 12, 12, 12, 12],
+    }
+    _base_channels = [64, 128, 256, 512, 1024, 256, 128, 128, 256, 256, 512]
+
+    def __init__(
+        self,
+        c2=128,
+        c3=256,
+        c4=512,
+        c5=1024,
+        scale_factor=0.75,
+        model_size="base",
+        channels_list=None,
+        num_repeats=None,
+    ):
+        super().__init__()
+        ch = channels_list if channels_list is not None else self._base_channels
+        sf = scale_factor
+        nr = num_repeats if num_repeats is not None else self._size_repeats.get(model_size, self._size_repeats["base"])
+
+        self.reduce_layer0 = _ConvBNAct(c5, int(ch[5] * sf), 1, 1, act=nn.ReLU)
+        self.Bifusion0 = _BiFusion([c4, c3], int(ch[5] * sf))
+        self.Rep_p4 = _BepC3(int(ch[5] * sf), int(ch[5] * sf), n=nr[5])
+
+        self.reduce_layer1 = _ConvBNAct(int(ch[5] * sf), int(ch[6] * sf), 1, 1, act=nn.ReLU)
+        self.Bifusion1 = _BiFusion([c3, c2], int(ch[6] * sf))
+        self.Rep_p3 = _BepC3(int(ch[6] * sf), int(ch[6] * sf), n=nr[6])
+
+        self.downsample2 = _ConvBNAct(int(ch[6] * sf), int(ch[7] * sf), 3, 2, act=nn.ReLU)
+        self.Rep_n3 = _BepC3(int(ch[6] * sf) + int(ch[7] * sf), int(ch[8] * sf), n=nr[7])
+
+        self.downsample1 = _ConvBNAct(int(ch[8] * sf), int(ch[9] * sf), 3, 2, act=nn.ReLU)
+        self.Rep_n4 = _BepC3(int(ch[5] * sf) + int(ch[9] * sf), int(ch[10] * sf), n=nr[8])
+
+    def forward(self, x):
+        """Forward pass.
+
+        Args:
+            x (list[Tensor]): Multi-scale features [c2, c3, c4, c5] from backbone.
+
+        Returns:
+            (list[Tensor]): Three output features [p3, p4, p5].
+        """
+        x3, x2, x1, x0 = x
+
+        fpn_out0 = self.reduce_layer0(x0)
+        f_concat_layer0 = self.Bifusion0([fpn_out0, x1, x2])
+        f_out0 = self.Rep_p4(f_concat_layer0)
+
+        fpn_out1 = self.reduce_layer1(f_out0)
+        f_concat_layer1 = self.Bifusion1([fpn_out1, x2, x3])
+        pan_out2 = self.Rep_p3(f_concat_layer1)
+
+        down_feat1 = self.downsample2(pan_out2)
+        pan_out1 = self.Rep_n3(torch.cat([down_feat1, fpn_out1], 1))
+
+        down_feat0 = self.downsample1(pan_out1)
+        pan_out0 = self.Rep_n4(torch.cat([down_feat0, fpn_out0], 1))
+
+        return [pan_out2, pan_out1, pan_out0]
+
+
+class _CSPConv(nn.Module):
+    """Conv + BN + activation for CSPRepBiFPAN."""
+
+    def __init__(self, c1, c2, k=3, s=1, act=nn.SiLU):
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, k // 2, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = act() if act else nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        return self.act(self.conv(x))
+
+
+class _BiFusion(nn.Module):
+    """Bi-directional fusion module for CSPRepBiFPAN.
+
+    Upsamples the highest-level feature, 1x1 convs the mid-level feature, and downsamples the lowest-level feature, then
+    concatenates and fuses.
+
+    Args:
+        in_channels (list[int]): Channels of the two lower-level inputs [mid, low].
+        out_channels (int): Output channels.
+    """
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.cv1 = _ConvBNAct(in_channels[0], out_channels, 1, 1, act=nn.ReLU)
+        self.cv2 = _ConvBNAct(in_channels[1], out_channels, 1, 1, act=nn.ReLU)
+        self.cv3 = _ConvBNAct(out_channels * 3, out_channels, 1, 1, act=nn.ReLU)
+        self.upsample = nn.Module()
+        self.upsample.upsample_transpose = nn.ConvTranspose2d(out_channels, out_channels, 2, 2, bias=True)
+        self.downsample = _ConvBNAct(out_channels, out_channels, 3, 2, act=nn.ReLU)
+
+    def forward(self, x):
+        """Forward pass.
+
+        Args:
+            x (list[Tensor]): [reduced_high, mid_feat, low_feat].
+
+        Returns:
+            (Tensor): Fused feature.
+        """
+        x0 = self.upsample.upsample_transpose(x[0])
+        x1 = self.cv1(x[1])
+        x2 = self.downsample(self.cv2(x[2]))
+        return self.cv3(torch.cat((x0, x1, x2), dim=1))
+
+
+class _ConvBNAct(nn.Module):
+    """Conv + BatchNorm + activation with .block nesting to match WeDetectPT checkpoint keys."""
+
+    def __init__(self, c1, c2, k=3, s=1, act=nn.SiLU):
+        super().__init__()
+        self.block = _CSPConv(c1, c2, k, s, act=act)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class _BottleRep(nn.Module):
+    """Bottleneck re-parameterisation block matching WeDetectPT's BottleRep.
+
+    Two ConvBNAct blocks with optional residual connection weighted by alpha.
+
+    Args:
+        c1 (int): Input channels.
+        c2 (int): Output channels.
+        act (type): Activation class. Default: nn.SiLU.
+    """
+
+    def __init__(self, c1, c2, act=nn.SiLU):
+        super().__init__()
+        self.conv1 = _ConvBNAct(c1, c2, 3, 1, act=act)
+        self.conv2 = _ConvBNAct(c2, c2, 3, 1, act=act)
+        self.shortcut = c1 == c2
+        if self.shortcut:
+            self.alpha = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        out = self.conv2(self.conv1(x))
+        return out + self.alpha * x if self.shortcut else out
+
+
+class _BepC3(nn.Module):
+    """CSP stacked re-parameterisation block (BepC3) matching WeDetectPT's BepC3.
+
+    Uses BottleRep blocks instead of RepVGG blocks for WeDetectPT compatibility.
+
+    Args:
+        c1 (int): Input channels.
+        c2 (int): Output channels.
+        n (int): Number of BottleRep blocks.
+        e (float): Expansion ratio. Default: 0.5.
+    """
+
+    def __init__(self, c1, c2, n=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = _ConvBNAct(c1, c_, 1, 1, act=nn.SiLU)
+        self.cv2 = _ConvBNAct(c1, c_, 1, 1, act=nn.SiLU)
+        self.m = _RepBlock(c_, c_, n=n)
+        self.cv3 = _ConvBNAct(2 * c_, c2, 1, 1, act=nn.SiLU)
+
+    def forward(self, x):
+        return self.cv3(torch.cat([self.m(self.cv1(x)), self.cv2(x)], 1))
+
+
+class _RepBlock(nn.Module):
+    """Re-parameterisation stage block matching WeDetectPT's RepBlock.
+
+    First block is a BottleRep, subsequent blocks are in a Sequential.
+
+    Args:
+        c1 (int): Input channels.
+        c2 (int): Output channels.
+        n (int): Number of BottleRep blocks.
+    """
+
+    def __init__(self, c1, c2, n=1):
+        super().__init__()
+        self.conv1 = _BottleRep(c1, c2)
+        n = n // 2
+        self.block = nn.Sequential(*[_BottleRep(c2, c2) for _ in range(n - 1)]) if n > 1 else None
+
+    def forward(self, x):
+        x = self.conv1(x)
+        if self.block is not None:
+            x = self.block(x)
+        return x

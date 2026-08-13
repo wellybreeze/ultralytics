@@ -1,7 +1,7 @@
 ---
 title: nn.tasks API Reference
 description: Dive into the intricacies of YOLO tasks.py. Learn about DetectionModel, PoseModel and more for powerful AI development.
-keywords: Ultralytics, YOLO, nn tasks, DetectionModel, PoseModel, RTDETRDetectionModel, model weights, parse model, AI development
+keywords: Ultralytics, YOLO, nn tasks, DetectionModel, PoseModel, RTDETRDetectionModel, RFDETRDetectionModel, model weights, parse model, AI development
 ---
 
 # Reference for `ultralytics/nn/tasks.py`
@@ -41,6 +41,18 @@ keywords: Ultralytics, YOLO, nn tasks, DetectionModel, PoseModel, RTDETRDetectio
 <br><br><hr><br>
 
 ## ::: ultralytics.nn.tasks.ClassificationModel
+
+<br><br><hr><br>
+
+## ::: ultralytics.nn.tasks.RFDETRDetectionModel
+
+<br><br><hr><br>
+
+## ::: ultralytics.nn.tasks.RFDETRSegmentationModel
+
+<br><br><hr><br>
+
+## ::: ultralytics.nn.tasks.RFDETRPoseModel
 
 <br><br><hr><br>
 

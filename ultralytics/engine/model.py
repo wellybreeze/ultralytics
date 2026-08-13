@@ -711,6 +711,8 @@ class Model(torch.nn.Module):
                 - quantize (int | str): Precision, e.g. 16 (FP16) or 8 (INT8); 32/None is FP32.
                 - device (str): Device to run the export on.
                 - workspace (int): Maximum memory workspace size for TensorRT engines.
+                - builder_optimization_level (int): TensorRT builder optimization level 0-5
+                  (``trtexec --builderOptimizationLevel``); higher spends more build time for tactics.
                 - nms (bool): Add Non-Maximum Suppression (NMS) module to model.
                 - simplify (bool): Simplify ONNX model.
 

@@ -1,0 +1,33 @@
+# 车辆检测 — 开放词汇微调（单数据集 + 扩词表）
+# 标注保持 class_id=0（车）；词表第 0 项必须是车，其后为负类中文提示（来自 COCO80 重组）
+#
+# train.py 示例:
+#   data="ultralytics/cfg/datasets/customer/wedetect_dataset.yaml"
+#   cfg="ultralytics/cfg/wedetect_finetune.yaml"
+#
+# 伪标签：写在本数据集 yaml 中（混数时可只对本子集开启；优先于 train args）
+
+path: /path/to/dataset
+train: train.txt
+val: valid.txt
+
+# 长度可 > nc：多出的行只作训练负类文本，不参与 val 的 nc 类指标
+# 同行仅放近义提示；属性短语勿与基类同行（见 docs/zh/guides/wedetect-ov-finetune.md §3.3）
+# 相对本 yaml 所在目录（customer/）
+class_texts: wedetect_dataset_txt.json
+
+# nc 由 names 决定；只保留已标注类，避免 val 对未标注类计 FP
+names:
+  0: 标注类别1
+  1: 标注类别2
+  2: ...
+
+# 训练前伪标签（仅本数据集 train）
+pseudo_label: true
+pseudo_label_model: yolo26x.pt # 或 yolo26x.pt / wedetect_*.pt / sam3.pt
+# pseudo_label_classes: ""              # 空 = COCO names
+# pseudo_label_class_texts: ""          # 空 = coco_zh_class_texts.json
+pseudo_label_conf: 0.2 # 伪标签置信度
+pseudo_label_batch: 0 # 0=按空闲显存自动，伪标签批次大小
+pseudo_label_mem_fraction: 0.8 # 伪标签推理自动batch内存占用比例
+# pseudo_label_imgsz: 640              # teacher 推理分辨率；默认 640，与训练 imgsz 无关

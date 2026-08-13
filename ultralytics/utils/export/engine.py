@@ -13,6 +13,32 @@ from ultralytics.utils.checks import check_requirements, check_tensorrt, check_v
 from ultralytics.utils.torch_utils import TORCH_2_4, TORCH_2_9
 
 
+def apply_builder_optimization_level(config, level: int | None, prefix: str = "") -> None:
+    """Set TensorRT ``IBuilderConfig.builder_optimization_level`` when supported.
+
+    Corresponds to ``trtexec --builderOptimizationLevel``. Higher levels spend more build time searching tactics (often
+    better runtime); lower levels build faster. Valid range is 0-5 (TensorRT default 3). ``None`` leaves the TensorRT
+    default unchanged.
+
+    Args:
+        config: TensorRT builder config instance.
+        level (int | None): Optimization level in ``[0, 5]``, or ``None`` to skip.
+        prefix (str): Log prefix.
+    """
+    if level is None:
+        return
+    level = int(level)
+    if not 0 <= level <= 5:
+        raise ValueError(f"builder_optimization_level must be in [0, 5], got {level}")
+    if not hasattr(config, "builder_optimization_level"):
+        LOGGER.warning(
+            f"{prefix} builder_optimization_level is not supported by this TensorRT build; ignoring level={level}"
+        )
+        return
+    config.builder_optimization_level = level
+    LOGGER.info(f"{prefix} builder_optimization_level={level}")
+
+
 class _NormalizeCoords(torch.nn.Module):
     """Wrap a model with input-relative box and pose coordinates for per-tensor quantization."""
 
@@ -220,6 +246,7 @@ def onnx2engine(
     metadata: dict | None = None,
     verbose: bool = False,
     prefix: str = "",
+    builder_optimization_level: int | None = None,
 ) -> str:
     """Export a YOLO model to TensorRT engine format.
 
@@ -235,6 +262,8 @@ def onnx2engine(
         metadata (dict | None): Metadata to include in the engine file.
         verbose (bool, optional): Enable verbose logging.
         prefix (str, optional): Prefix for log messages.
+        builder_optimization_level (int | None): TensorRT builder optimization level ``[0, 5]`` (``trtexec
+            --builderOptimizationLevel``); ``None`` keeps the TensorRT default (3).
 
     Returns:
         (str): Path to the exported engine file.
@@ -284,6 +313,7 @@ def onnx2engine(
             config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
         else:  # TensorRT 7 fallback
             config.max_workspace_size = workspace_bytes
+    apply_builder_optimization_level(config, builder_optimization_level, prefix)
     # EXPLICIT_BATCH flag is removed in TensorRT 10 (explicit batch is the only/default mode); keep it for TRT 7/8
     flag = 0 if is_trt10 else (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     network = builder.create_network(flag)

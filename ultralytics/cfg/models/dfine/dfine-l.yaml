@@ -1,0 +1,57 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# D-FINE-L (HGNetv2-B4) — official HybridEncoder + DFINEDecoder
+# Matches D-FINE configs/define/dfine_hgnetv2_l_coco.yml + include/dfine_hgnetv2.yml
+# Backbone stage channels from HGNetv2 B4 arch_configs
+
+# Parameters
+nc: 80 # number of classes
+freeze_norm: true # official HGNetv2.freeze_norm (FrozenBatchNorm2d in backbone)
+scales:
+  # [depth, width, max_channels] — width kept at 1.0 for official channel parity
+  l: [1.00, 1.00, 2048]
+
+backbone:
+  # [from, repeats, module, args]  — HGNetv2-B4, return_idx [1,2,3] → P3/P4/P5
+  - [-1, 1, HGStem, [32, 48]] # 0-P2/4
+  - [-1, 6, HGBlock, [48, 128, 3]] # 1 stage1
+
+  - [-1, 1, DWConv, [128, 3, 2, 1, False]] # 2-P3/8
+  - [-1, 6, HGBlock, [96, 512, 3]] # 3 stage2 (P3)
+
+  - [-1, 1, DWConv, [512, 3, 2, 1, False]] # 4-P4/16
+  - [-1, 6, HGBlock, [192, 1024, 5, True, False]] # 5
+  - [-1, 6, HGBlock, [192, 1024, 5, True, True]] # 6
+  - [-1, 6, HGBlock, [192, 1024, 5, True, True]] # 7 stage3 (P4)
+
+  - [-1, 1, DWConv, [1024, 3, 2, 1, False]] # 8-P5/32
+  - [-1, 6, HGBlock, [384, 2048, 5, True, False]] # 9 stage4 (P5)
+
+head:
+  # HybridEncoder: hd=256, dim_ffn=1024, expansion=1.0, depth_mult=1.0
+  # RepNCSPELAN4(hd*2, hd, hd*2, round(exp*hd/2), round(3*dm)) → [256, 512, 128, 3]
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 10 input_proj.2
+  - [-1, 1, AIFI, [1024, 8]] # 11
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 12 Y5, lateral_convs.0
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 13
+  - [7, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 14 input_proj.1
+  - [[-2, -1], 1, Concat, [1]] # 15
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 3]] # 16 fpn_blocks.0
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 17 Y4, lateral_convs.1
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 18
+  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 19 input_proj.0
+  - [[-2, -1], 1, Concat, [1]] # 20
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 3]] # 21 X3 / fpn_blocks.1
+
+  - [-1, 1, DFINESCDown, [256, 3, 2]] # 22 downsample_convs.0
+  - [[-1, 17], 1, Concat, [1]] # 23
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 3]] # 24 F4 / pan_blocks.0
+
+  - [-1, 1, DFINESCDown, [256, 3, 2]] # 25 downsample_convs.1
+  - [[-1, 12], 1, Concat, [1]] # 26
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 3]] # 27 F5 / pan_blocks.1
+
+  # DFINEDecoder: after parse_model inserts ch at index 1 → (nc, ch, hd, nq, n_heads, nl, ...)
+  - [[21, 24, 27], 1, DFINEDecoder, [nc, 256, 300, 8, 6]] # P3, P4, P5

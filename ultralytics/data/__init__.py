@@ -10,6 +10,8 @@ from .dataset import (
     YOLOConcatDataset,
     YOLODataset,
     YOLOMultiModalDataset,
+    attach_shared_neg_queue,
+    build_global_class_texts,
 )
 
 __all__ = (
@@ -21,7 +23,9 @@ __all__ = (
     "YOLOConcatDataset",
     "YOLODataset",
     "YOLOMultiModalDataset",
+    "attach_shared_neg_queue",
     "build_dataloader",
+    "build_global_class_texts",
     "build_grounding",
     "build_yolo_dataset",
     "load_inference_source",

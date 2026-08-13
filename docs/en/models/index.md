@@ -1,7 +1,7 @@
 ---
 comments: true
-description: Discover a variety of models supported by Ultralytics, including YOLO26 back to YOLOv3, NAS, SAM, and RT-DETR for detection, segmentation, semantic segmentation, depth estimation, and more.
-keywords: Ultralytics, supported models, YOLO26, YOLO12, YOLO11, YOLOv10, YOLOv9, YOLOv8, YOLOv7, YOLOv6, YOLOv5, YOLOv4, YOLOv3, SAM3, SAM2, SAM, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, YOLO-World, YOLOE, object detection, image segmentation, semantic segmentation, depth estimation, classification, pose estimation, multi-object tracking
+description: Discover a variety of models supported by Ultralytics, including YOLO26 back to YOLOv3, NAS, SAM, RT-DETR, RF-DETR, and D-FINE for detection, segmentation, semantic segmentation, depth estimation, and more.
+keywords: Ultralytics, supported models, YOLO26, YOLO12, YOLO11, YOLOv10, YOLOv9, YOLOv8, YOLOv7, YOLOv6, YOLOv5, YOLOv4, YOLOv3, SAM3, SAM2, SAM, MobileSAM, FastSAM, YOLO-NAS, RT-DETR, RF-DETR, D-FINE, YOLO-World, YOLOE, object detection, image segmentation, semantic segmentation, depth estimation, classification, pose estimation, multi-object tracking
 ---
 
 # Models Supported by Ultralytics
@@ -12,7 +12,7 @@ Welcome to Ultralytics' model documentation! We offer support for a wide range o
 
 ## Featured Models
 
-Start with [YOLO26](yolo26.md) for a new project: it is the latest Ultralytics release and the only one covering all seven tasks. [YOLO11](yolo11.md) is the mature alternative, with pretrained checkpoints for each of its five tasks. Pick a specialized family only when you need promptable segmentation ([SAM 3](sam-3.md)), open-vocabulary detection ([YOLOE](yoloe.md), [YOLO-World](yolo-world.md)), or a transformer detector ([RT-DETR](rtdetr.md)).
+Start with [YOLO26](yolo26.md) for a new project: it is the latest Ultralytics release and the only one covering all seven tasks. [YOLO11](yolo11.md) is the mature alternative, with pretrained checkpoints for each of its five tasks. Pick a specialized family only when you need promptable segmentation ([SAM 3](sam-3.md)), open-vocabulary detection ([YOLOE](yoloe.md), [YOLO-World](yolo-world.md), [WeDetect](wedetect.md)), or a transformer detector ([RT-DETR](rtdetr.md), [RF-DETR](rfdetr.md), [D-FINE](dfine.md)).
 
 The table lists every documented model with the tasks it covers, which of the [train, val, predict and export](../modes/index.md) modes Ultralytics supports for it, and when to choose it. [Track](../modes/track.md) is not listed separately: it runs on top of predict for Detect, Segment, Pose and OBB models, while SAM 2 and SAM 3 track through their own video predictors. [Benchmark](../modes/benchmark.md) is not listed either, because it wraps export and val across formats rather than adding support of its own.
 
@@ -36,18 +36,21 @@ The table lists every documented model with the tasks it covers, which of the [t
 | **[FastSAM](fast-sam.md)**      | Segment                                               | Val, Predict, Export        | CNN-based promptable segmentation when SAM latency is the bottleneck (Chinese Academy of Sciences)                                                                                               |
 | **[YOLO-NAS](yolo-nas.md)**     | Detect                                                | Val, Predict, Export        | Deci's [NAS](https://www.ultralytics.com/glossary/neural-architecture-search-nas)-optimized detectors, kept for inference and export; Deci no longer maintains them after the NVIDIA acquisition |
 | **[RT-DETR](rtdetr.md)**        | Detect                                                | Train, Val, Predict, Export | Baidu's real-time DETR detector: a convolutional backbone with a hybrid [transformer](https://www.ultralytics.com/glossary/transformer) encoder                                                  |
+| **[RF-DETR](rfdetr.md)**        | Detect, Segment, Pose                                 | Train, Val, Predict, Export | Roboflow's DINOv2-based real-time Detection Transformer for detection, instance segmentation, and keypoints                                                                                      |
+| **[D-FINE](dfine.md)**          | Detect                                                | Train, Val, Predict, Export | Fine-grained Distribution Refinement DETR detector (HGNetv2 + FDR decoder) with native Ultralytics train/val/predict/export                                                                      |
 | **[YOLO-World](yolo-world.md)** | Detect                                                | Train, Val, Predict, Export | Open-vocabulary detection from text prompts (Tencent AI Lab); export requires the `-worldv2` checkpoints                                                                                         |
 | **[YOLOE](yoloe.md)**           | Detect, Segment                                       | Train, Val, Predict, Export | Open-vocabulary detection and segmentation with text, visual, or prompt-free inference                                                                                                           |
+| **[WeDetect](wedetect.md)**     | Detect                                                | Train, Val, Predict, Export | Open-vocabulary detection with ConvNeXt + XLM-RoBERTa, mixed YOLO subsets, optional D-FINE/SAM3 pseudo labels, and dual vision/language export                                                   |
 
 <p align="center">
-  <br>
-  <iframe loading="lazy" width="720" height="405" src="https://www.youtube.com/embed/MWq1UxqTClU?si=nHAW-lYDzrz68jR0"
-    title="YouTube video player" frameborder="0"
-    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-    allowfullscreen>
-  </iframe>
-  <br>
-  <strong>Watch:</strong> Run Ultralytics YOLO models in just a few lines of code.
+    <br>
+    <iframe loading="lazy" width="720" height="405" src="https://www.youtube.com/embed/MWq1UxqTClU?si=nHAW-lYDzrz68jR0"
+        title="YouTube video player" frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen>
+    </iframe>
+    <br>
+    <strong>Watch:</strong> Run Ultralytics YOLO models in just a few lines of code.
 </p>
 
 ## Getting Started: Usage Examples
@@ -60,7 +63,7 @@ Note the below example spotlights YOLO26 [Detect](../tasks/detect.md) models for
 
     === "Python"
 
-        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()` and `RTDETR()` classes to create a model instance in Python:
+        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()`, `RTDETR()`, `RFDETR()`, `DFINE()` and `WeDetect()` classes to create a model instance in Python:
 
         ```python
         from ultralytics import YOLO
@@ -142,7 +145,7 @@ For more detailed instructions, visit the [Train](../modes/train.md) documentati
 
 ### Which YOLO versions are supported by Ultralytics?
 
-Ultralytics natively supports YOLOv3, YOLOv5, YOLOv6, YOLOv8, YOLOv9, YOLOv10, YOLO11, YOLO12, and YOLO26, along with the SAM family (SAM 3, SAM 2, SAM, MobileSAM and FastSAM), YOLO-NAS, RT-DETR, YOLO-World, and YOLOE. The package publishes no weights or YAMLs for YOLOv4 or YOLOv7: YOLOv4 is documented as an architecture reference only, while YOLOv7 runs as an exported ONNX or TensorRT model. See [Featured Models](#featured-models) for the tasks and modes available for each.
+Ultralytics natively supports YOLOv3, YOLOv5, YOLOv6, YOLOv8, YOLOv9, YOLOv10, YOLO11, YOLO12, and YOLO26, along with the SAM family (SAM 3, SAM 2, SAM, MobileSAM and FastSAM), YOLO-NAS, RT-DETR, RF-DETR, D-FINE, YOLO-World, and YOLOE. The package publishes no weights or YAMLs for YOLOv4 or YOLOv7: YOLOv4 is documented as an architecture reference only, while YOLOv7 runs as an exported ONNX or TensorRT model. See [Featured Models](#featured-models) for the tasks and modes available for each.
 
 ### Why should I use Ultralytics Platform for [machine learning](https://www.ultralytics.com/glossary/machine-learning-ml) projects?
 

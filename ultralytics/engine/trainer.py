@@ -199,8 +199,23 @@ class BaseTrainer:
         self.csv = self.save_dir / "results.csv"
         if self.csv.exists() and not self.args.resume:
             self.csv.unlink()
-        self.plot_idx = [0, 1, 2]
+        self._plot_milestones: set[tuple[int, int]] = set()
         self.nan_recovery_attempts = 0
+
+    def _init_plot_milestones(self) -> None:
+        """Build epoch/batch plot triggers; stable when ``nb`` changes (e.g. OOM batch reduce)."""
+        milestones: set[tuple[int, int]] = set()
+        if self.start_epoch == 0:
+            milestones.update((0, i) for i in range(3))
+        if self.args.close_mosaic:
+            cm_epoch = self.epochs - self.args.close_mosaic
+            if cm_epoch >= self.start_epoch:
+                milestones.update((cm_epoch, i) for i in range(3))
+        self._plot_milestones = milestones
+
+    def _should_plot_training_batch(self, epoch: int, batch_i: int) -> bool:
+        """True when this train batch should be saved as ``train_batch*.jpg``."""
+        return (epoch, batch_i) in self._plot_milestones
 
     def add_callback(self, event: str, callback):
         """Append the given callback to the event's callback list."""
@@ -376,8 +391,8 @@ class BaseTrainer:
                 if TORCH_2_4
                 else torch.cuda.amp.GradScaler(enabled=self.amp)
             )
-        # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
+        # Check imgsz against the model's max stride (YOLO P5/32, RF-DETR patch_size*num_windows, …)
+        gs = int(self.model.stride.max() if hasattr(self.model, "stride") else 32)
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
         self.stride = gs  # for multiscale training
 
@@ -414,6 +429,18 @@ class BaseTrainer:
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
         self.run_callbacks("on_pretrain_routine_end")
 
+    def _get_warmup_iterations(self, nb: int) -> int:
+        """Return warmup iteration count.
+
+        If ``warmup_iters`` > 0, use a fixed iteration budget (WeDetect-style LinearLR).
+        Otherwise fall back to ``warmup_epochs * nb`` (Ultralytics default), with a
+        minimum of 100 iterations when epochs-based warmup is enabled.
+        """
+        wi = int(getattr(self.args, "warmup_iters", 0) or 0)
+        if wi > 0:
+            return wi
+        return max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
+
     def _do_train(self):
         """Perform the full training loop including setup, epoch iteration, validation, and final evaluation."""
         if self.world_size > 1:
@@ -433,9 +460,7 @@ class BaseTrainer:
             f"Logging results to {colorstr('bold', self.save_dir)}\n"
             f"Starting training for " + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
         )
-        if self.args.close_mosaic:
-            base_idx = (self.epochs - self.args.close_mosaic) * nb
-            self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        self._init_plot_milestones()
         epoch = self.start_epoch
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         self._oom_retries = 0  # OOM auto-reduce counter for first epoch
@@ -467,14 +492,20 @@ class BaseTrainer:
                 if ni < nw:
                     xi = [0, nw]  # x interp
                     self.accumulate = max(1, int(np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round()))
+                    wsf = float(getattr(self.args, "warmup_start_factor", 0.0) or 0.0)
                     for x in self.optimizer.param_groups:
-                        # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        # Default: bias lr falls from warmup_bias_lr to lr0, others rise from 0.0.
+                        # When warmup_start_factor > 0 (e.g. WeDetect 0.001), all groups start at factor×initial_lr.
+                        if wsf > 0:
+                            start_lr = x["initial_lr"] * wsf
+                        else:
+                            start_lr = self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0
                         x["lr"] = float(
                             np.interp(
                                 ni,
                                 xi,
                                 [
-                                    self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0,
+                                    start_lr,
                                     x["initial_lr"] * self.lf(epoch),
                                 ],
                             )
@@ -567,7 +598,7 @@ class BaseTrainer:
                         )
                     )
                     self.run_callbacks("on_batch_end")
-                    if self.args.plots and ni in self.plot_idx:
+                    if self.args.plots and self._should_plot_training_batch(epoch, i):
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")

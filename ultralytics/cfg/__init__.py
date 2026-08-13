@@ -202,6 +202,7 @@ QUANTIZE_VALID_VALUES = "8, 16, 32, 'int8', 'fp16', 'fp32', 'w8a8', 'w16a16', 'w
 CFG_FLOAT_KEYS = frozenset(
     {  # integer or float arguments, i.e. x=2 and x=2.0
         "warmup_epochs",
+        "warmup_start_factor",
         "box",
         "cls",
         "dfl",
@@ -217,6 +218,10 @@ CFG_FLOAT_KEYS = frozenset(
         "time",
         "workspace",
         "batch",
+        "val_fitness_lvis_target_mult",
+        "val_fitness_dynamic_ema",
+        "val_fitness_weight_clip_min",
+        "val_fitness_weight_clip_max",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -246,6 +251,8 @@ CFG_FRACTION_KEYS = frozenset(
         "iou",
         "fraction",
         "multi_scale",
+        "pseudo_label_conf",
+        "pseudo_label_mem_fraction",
         "dlam",
     }
 )
@@ -258,15 +265,24 @@ CFG_INT_KEYS = frozenset(
         "close_mosaic",
         "mask_ratio",
         "max_det",
+        "max_classes",
+        "builder_optimization_level",
         "vid_stride",
         "line_width",
         "nbs",
         "save_period",
+        "warmup_iters",
+        "pseudo_label_batch",
+        "pseudo_label_imgsz",
+        "pseudo_label_flush_every",
+        "pseudo_label_prefetch",
     }
 )
 CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds
     "nbs": 1,
     "max_det": 1,
+    "max_classes": 1,
+    "builder_optimization_level": 0,
     "mask_ratio": 1,
     "vid_stride": 1,
     "seed": 0,
@@ -306,9 +322,26 @@ CFG_BOOL_KEYS = frozenset(
         "channels_last",
         "end2end",
         "cls_remap",
+        "mix_global_texts",
+        "use_neg_queue",
+        "freeze_text_encoder",
+        "close_set",
+        "mask_refine",
+        "pseudo_label",
+        "val_fitness_dynamic",
     }
 )
-CFG_STR_KEYS = frozenset({"optimizer", "split", "copy_paste_mode", "auto_augment"})
+CFG_STR_KEYS = frozenset(
+    {
+        "optimizer",
+        "split",
+        "copy_paste_mode",
+        "auto_augment",
+        "pseudo_label_model",
+        "pseudo_label_classes",
+        "pseudo_label_class_texts",
+    }
+)
 
 
 def cfg2dict(cfg: str | Path | dict | SimpleNamespace) -> dict:
@@ -1075,10 +1108,18 @@ def entrypoint(debug: str = "") -> None:
         LOGGER.warning(f"'model' argument is missing. Using default 'model={model}'.")
     overrides["model"] = model
     stem = Path(model).stem.lower()
-    if "rtdetr" in stem:  # guess architecture
+    if "rfdetr" in stem or "rf-detr" in stem:  # guess architecture
+        from ultralytics import RFDETR
+
+        model = RFDETR(model, task=task)
+    elif "rtdetr" in stem:  # guess architecture
         from ultralytics import RTDETR
 
         model = RTDETR(model)  # no task argument
+    elif "dfine" in stem:  # guess architecture
+        from ultralytics import DFINE
+
+        model = DFINE(model)  # no task argument
     elif "fastsam" in stem:
         from ultralytics import FastSAM
 

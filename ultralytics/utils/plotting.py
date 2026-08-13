@@ -1043,11 +1043,175 @@ def plot_images(
         on_plot(fname)
 
 
+def _results_curve_columns(columns: list[str]) -> list[str]:
+    """Order primary loss/metric CSV columns for a 2-row results grid (train→metrics→val)."""
+    loss_keys, metric_keys = [], []
+    for c in columns:
+        if not c.startswith(("train/", "val/", "metrics/")):
+            continue
+        if "loss" in c:
+            loss_keys.append(c)
+        elif "metric" in c:
+            metric_keys.append(c)
+    loss_mid, metric_mid = len(loss_keys) // 2, len(metric_keys) // 2
+    return loss_keys[:loss_mid] + metric_keys[:metric_mid] + loss_keys[loss_mid:] + metric_keys[metric_mid:]
+
+
+def _mixed_val_tags(columns: list[str]) -> list[str]:
+    """Return WeDetect-style multi-val tags from CSV columns like ``lvis/metrics/mAP50(B)``."""
+    tags: list[str] = []
+    skip = {"train", "val", "metrics", "lr", "epoch", "time", "fitness"}
+    for c in columns:
+        if "/" not in c:
+            continue
+        tag, rest = c.split("/", 1)
+        if tag in skip or tag in tags:
+            continue
+        if "metric" in rest or "loss" in rest or rest == "fitness":
+            tags.append(tag)
+    return tags
+
+
+def _save_results_figure(
+    series: list[tuple[str, np.ndarray, dict[str, np.ndarray]]],
+    columns: list[str],
+    fname: Path,
+    on_plot: Callable | None = None,
+) -> Path | None:
+    """Save a 2-row results curve figure.
+
+    Args:
+        series: ``[(label, x, {col: y}), ...]`` overlaid per axis (each series may have its own ``x``).
+        columns: Column keys / titles for each subplot.
+        fname: Output PNG path.
+        on_plot: Optional callback after save.
+    """
+    import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
+
+    if not columns or not series:
+        return None
+    ncols = max(1, (len(columns) + 1) // 2)
+    fig, ax = plt.subplots(2, ncols, figsize=(2 * ncols + 2, 6), tight_layout=True)
+    ax = np.atleast_1d(ax).ravel()
+    for i, col in enumerate(columns):
+        for label, x, ys in series:
+            if col not in ys:
+                continue
+            y = ys[col].astype("float")
+            ax[i].plot(x, y, marker=".", label=label, linewidth=2, markersize=8)
+            if len(series) == 1:  # single run: keep classic smooth dashed line
+                ax[i].plot(x, _gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2)
+        ax[i].set_title(col, fontsize=12)
+    for k in range(len(columns), len(ax)):
+        ax[k].set_visible(False)
+    ax[min(1, len(ax) - 1)].legend()
+    fig.savefig(fname, dpi=200)
+    plt.close(fig)
+    if on_plot:
+        on_plot(fname)
+    return fname
+
+
+@plt_settings()
+def plot_mixed_val_results(file: str | Path, on_plot: Callable | None = None) -> list[Path]:
+    """Plot WeDetect mixed multi-val metrics from a tagged ``results.csv``.
+
+    Expects columns like ``{tag}/metrics/...`` and ``{tag}/fitness`` (first val also has unprefixed keys for the main
+    ``results.png``). Writes:
+
+    - ``results_multival.png``: one row of subplots per dataset (not overlaid)
+    - ``multival_results.png``: last-epoch fitness bar chart (via ``plot_multitrain_results``)
+
+    Args:
+        file (str | Path): Path to ``results.csv``.
+        on_plot (Callable, optional): Callback after each figure is saved.
+
+    Returns:
+        (list[Path]): Paths of figures that were written.
+    """
+    import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
+    import polars as pl
+
+    f = Path(file)
+    data = pl.read_csv(f, infer_schema_length=None)
+    tags = _mixed_val_tags(list(data.columns))
+    if not tags:
+        return []
+
+    x = data.select(data.columns[0]).to_numpy().flatten()
+    # Shared suffixes present on ≥1 tag (metrics first, then val losses)
+    suffixes: list[str] = []
+    for c in data.columns:
+        for tag in tags:
+            if not c.startswith(f"{tag}/"):
+                continue
+            suf = c[len(tag) + 1 :]
+            if suf == "fitness" or suf in suffixes:
+                continue
+            if "metric" in suf or "loss" in suf:
+                suffixes.append(suf)
+    metric_suf = [s for s in suffixes if s.startswith("metrics/")]
+    loss_suf = [s for s in suffixes if "loss" in s]
+    loss_mid, metric_mid = len(loss_suf) // 2, len(metric_suf) // 2
+    plot_suf = loss_suf[:loss_mid] + metric_suf[:metric_mid] + loss_suf[loss_mid:] + metric_suf[metric_mid:]
+    if not plot_suf:
+        plot_suf = suffixes
+
+    out: list[Path] = []
+    if plot_suf:
+        nrows, ncols = len(tags), len(plot_suf)
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(2.4 * ncols + 2, 2.2 * nrows + 1), squeeze=False, tight_layout=True
+        )
+        for i, tag in enumerate(tags):
+            for j, suf in enumerate(plot_suf):
+                ax = axes[i, j]
+                col = f"{tag}/{suf}"
+                if col in data.columns:
+                    y = data.select(col).to_numpy().flatten().astype("float")
+                    ax.plot(x, y, marker=".", linewidth=2, markersize=8)
+                    ax.plot(x, _gaussian_filter1d(y, sigma=3), ":", linewidth=2)
+                else:
+                    ax.set_axis_off()
+                if i == 0:
+                    ax.set_title(suf, fontsize=10)
+                if j == 0:
+                    ax.set_ylabel(tag, fontsize=11)
+        fname = f.parent / "results_multival.png"
+        fig.savefig(fname, dpi=200)
+        plt.close(fig)
+        out.append(fname)
+        if on_plot:
+            on_plot(fname)
+
+    scores = {}
+    for tag in tags:
+        col = f"{tag}/fitness"
+        if col in data.columns:
+            scores[tag] = float(data.select(col).to_numpy().flatten()[-1])
+    if scores:
+        bar = plot_multitrain_results(
+            scores,
+            key="fitness",
+            save_dir=f.parent,
+            name="multival_results.png",
+            title=f"Mixed val fitness across {len(scores)} datasets",
+        )
+        if bar:
+            out.append(bar)
+            if on_plot:
+                on_plot(bar)
+    return out
+
+
 @plt_settings()
 def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Callable | None = None):
     """Plot training results from a results CSV file. The function supports various types of data including instance
     segmentation, semantic segmentation, pose estimation, and classification. Plots are saved as 'results.png' in
     the directory where the CSV is located.
+
+    When the CSV includes WeDetect mixed multi-val columns (``{tag}/metrics/...``), also writes ``results_multival.png``
+    and ``multival_results.png``.
 
     Args:
         file (str, optional): Path to the CSV file containing the training results.
@@ -1058,55 +1222,48 @@ def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Call
         >>> from ultralytics.utils.plotting import plot_results
         >>> plot_results("path/to/results.csv")
     """
-    import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
     import polars as pl
 
     save_dir = Path(file).parent if file else Path(dir)
-    files = list(save_dir.glob("results*.csv"))
+    files = sorted(save_dir.glob("results*.csv"), key=lambda p: (p.name != "results.csv", p.name))
     assert len(files), f"No results.csv files found in {save_dir.resolve()}, nothing to plot."
 
-    loss_keys, metric_keys = [], []
-    fig, ax = None, None
-    for i, f in enumerate(files):
-        try:
+    try:
+        columns: list[str] = []
+        series: list[tuple[str, np.ndarray, dict[str, np.ndarray]]] = []
+        mixed_csv = None
+        for i, f in enumerate(files):
             data = pl.read_csv(f, infer_schema_length=None)
             if i == 0:
-                for c in data.columns:
-                    if "loss" in c:
-                        loss_keys.append(c)
-                    elif "metric" in c:
-                        metric_keys.append(c)
-                loss_mid, metric_mid = len(loss_keys) // 2, len(metric_keys) // 2
-                columns = (
-                    loss_keys[:loss_mid] + metric_keys[:metric_mid] + loss_keys[loss_mid:] + metric_keys[metric_mid:]
-                )
-                fig, ax = plt.subplots(2, len(columns) // 2, figsize=(len(columns) + 2, 6), tight_layout=True)
-                ax = ax.ravel()
+                columns = _results_curve_columns(list(data.columns))
+                if f.name == "results.csv":
+                    mixed_csv = f
             x = data.select(data.columns[0]).to_numpy().flatten()
-            for i, j in enumerate(columns):
-                y = data.select(j).to_numpy().flatten().astype("float")
-                ax[i].plot(x, y, marker=".", label=f.stem, linewidth=2, markersize=8)  # actual results
-                ax[i].plot(x, _gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2)  # smoothing line
-                ax[i].set_title(j, fontsize=12)
-        except Exception as e:
-            LOGGER.error(f"Plotting error for {f}: {e}")
-    if ax is not None:
-        ax[1].legend()
-        fname = save_dir / "results.png"
-        fig.savefig(fname, dpi=200)
-        plt.close()
-        if on_plot:
-            on_plot(fname)
+            ys = {c: data.select(c).to_numpy().flatten() for c in columns if c in data.columns}
+            series.append((f.stem, x, ys))
+        _save_results_figure(series, columns, save_dir / "results.png", on_plot=on_plot)
+        if mixed_csv is not None:
+            plot_mixed_val_results(mixed_csv, on_plot=on_plot)
+    except Exception as e:
+        LOGGER.error(f"Plotting error for {files[0]}: {e}")
 
 
 @plt_settings()
-def plot_multitrain_results(scores: dict, key: str = "fitness", save_dir=Path()):
+def plot_multitrain_results(
+    scores: dict,
+    key: str = "fitness",
+    save_dir=Path(),
+    name: str = "multitrain_results.png",
+    title: str | None = None,
+):
     """Plot per-dataset metrics from a multi-dataset training run as a bar chart with the cross-dataset mean.
 
     Args:
         scores (dict): Mapping of dataset name to its scalar metric value.
         key (str): Name of the plotted metric, used as the y-axis label.
-        save_dir (str | Path): Directory to save the 'multitrain_results.png' figure.
+        save_dir (str | Path): Directory to save the figure.
+        name (str): Output filename (default ``multitrain_results.png``).
+        title (str, optional): Figure title; defaults to a MultiTrainer label.
 
     Returns:
         (Path): Path to the saved figure.
@@ -1117,6 +1274,8 @@ def plot_multitrain_results(scores: dict, key: str = "fitness", save_dir=Path())
     """
     import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
 
+    if not scores:
+        return None
     mean = sum(scores.values()) / len(scores)
     fig, ax = plt.subplots(figsize=(max(6.0, len(scores) * 0.45), 5), tight_layout=True)
     ax.bar(range(len(scores)), list(scores.values()), color="#042AFF")
@@ -1124,9 +1283,9 @@ def plot_multitrain_results(scores: dict, key: str = "fitness", save_dir=Path())
     ax.set_xticks(range(len(scores)))
     ax.set_xticklabels(list(scores), rotation=90)
     ax.set_ylabel(key)
-    ax.set_title(f"MultiTrainer results across {len(scores)} datasets")
+    ax.set_title(title or f"MultiTrainer results across {len(scores)} datasets")
     ax.legend()
-    fname = Path(save_dir) / "multitrain_results.png"
+    fname = Path(save_dir) / name
     fig.savefig(fname, dpi=200)
     plt.close(fig)
     return fname

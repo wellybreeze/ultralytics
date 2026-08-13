@@ -1,0 +1,46 @@
+# WeDetect mixed-dataset configuration (Ultralytics style, WeDetect-strength mixing)
+#
+# Usage (fine-tune or from-scratch):
+#   model.train(data="ultralytics/cfg/datasets/wedetect_mixed.yaml", cfg="wedetect_finetune.yaml", ...)
+#   # or: yolo cfg=wedetect_finetune.yaml model=wedetect_base.pt data=wedetect_mixed.yaml
+#
+# Design (aligned with original WeDetect WeConcat + text-as-id):
+#   - Each YOLO subset keeps its own names / class_texts (local category ids need NOT match)
+#   - At train time, WeDetectTrainer merges texts by synonym overlap → global vocab + local→global remap
+#   - Mosaic/MixUp merges synonym groups that share any string
+#   - Optional use_neg_queue=True shares a NegQueue across subsets for dynamic negatives
+#   - Multiple val.yolo_data entries: each is evaluated every epoch with its own nc/names/class_texts
+#     * best.pt fitness = weighted average of all val sets (default: equal weights)
+#     * Optional: val_fitness_weights: [0.5, 0.3, 0.2]  # epoch 1 when val_fitness_dynamic is true
+#     * Optional: val_fitness_dynamic: true  # epoch 2+ reweight by prior mAP50-95
+#     * Per-set metrics are logged with a "<dataset_name>/" prefix in results.csv
+#
+# Example: domain data (custom classes) + COCO/LVIS (open-vocab retention), Chinese prompts preferred.
+
+train:
+  yolo_data:
+    # - path/to/my_domain.yaml          # e.g. only "车" annotated; can still ship a large class_texts
+    - ultralytics/cfg/datasets/customer/wedetect_dataset.yaml # or wedetect_coco.yaml with class_texts
+  # grounding_data:                     # optional grounding / referring (COCO-style JSON, not JSONL)
+  #   - img_path: path/to/images
+  #     json_file: path/to/annotations.json  # {"images":[...],"annotations":[...]} + caption/tokens_positive
+
+val:
+  yolo_data:
+    - ultralytics/cfg/datasets/customer/wedetect_dataset.yaml
+# val_fitness_weights: [1, 1, 1]   # optional; default equal share across val sets
+
+# Optional: default class_texts for any train subset that omits its own key
+# class_texts: texts/coco_zh_class_texts.json
+
+# Optional mixing knobs (also settable via train() / CLI / finetune yaml):
+# mix_global_texts: true
+# use_neg_queue: false
+#
+# Pseudo labels (prefer per-subset YAML, e.g. wedetect_vehicle.yaml):
+#   - Put pseudo_label* on the subset yaml to enable only that train set
+#   - Or set defaults here for any train subset that omits the key:
+# pseudo_label: true
+# pseudo_label_model: yolo11x.pt
+# pseudo_label_conf: 0.25
+# A subset may set pseudo_label: false to opt out even if top-level is true.

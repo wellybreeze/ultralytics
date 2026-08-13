@@ -1,0 +1,54 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# D-FINE-M (HGNetv2-B2) — official HybridEncoder + DFINEDecoder
+# Matches D-FINE configs/define/dfine_hgnetv2_m_coco.yml (depth_mult=0.67, nl=4, use_lab=True)
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  m: [1.00, 1.00, 1536]
+
+backbone:
+  # [from, repeats, module, args]  — HGNetv2-B2, return_idx [1,2,3]
+  - [-1, 1, HGStem, [24, 32, True]] # 0-P2/4
+  - [-1, 4, HGBlock, [32, 96, 3, False, False, True]] # 1 stage1
+
+  - [-1, 1, DWConv, [96, 3, 2, 1, False]] # 2-P3/8
+  - [-1, 4, HGBlock, [64, 384, 3, False, False, True]] # 3 stage2 (P3)
+
+  - [-1, 1, DWConv, [384, 3, 2, 1, False]] # 4-P4/16
+  - [-1, 4, HGBlock, [128, 768, 5, True, False, True]] # 5
+  - [-1, 4, HGBlock, [128, 768, 5, True, True, True]] # 6
+  - [-1, 4, HGBlock, [128, 768, 5, True, True, True]] # 7 stage3 (P4)
+
+  - [-1, 1, DWConv, [768, 3, 2, 1, False]] # 8-P5/32
+  - [-1, 4, HGBlock, [256, 1536, 5, True, False, True]] # 9 stage4 (P5)
+
+head:
+  # HybridEncoder: hd=256, expansion=1.0, depth_mult=0.67 → c4=128, n=round(3*0.67)=2
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 10 input_proj.2
+  - [-1, 1, AIFI, [1024, 8]] # 11
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 12 Y5
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 13
+  - [7, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 14 input_proj.1
+  - [[-2, -1], 1, Concat, [1]] # 15
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 2]] # 16 fpn_blocks.0
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 17 Y4
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 18
+  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 19 input_proj.0
+  - [[-2, -1], 1, Concat, [1]] # 20
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 2]] # 21 X3
+
+  - [-1, 1, DFINESCDown, [256, 3, 2]] # 22
+  - [[-1, 17], 1, Concat, [1]] # 23
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 2]] # 24 F4
+
+  - [-1, 1, DFINESCDown, [256, 3, 2]] # 25
+  - [[-1, 12], 1, Concat, [1]] # 26
+  - [-1, 1, DFINERepNCSPELAN4, [256, 512, 128, 2]] # 27 F5
+
+  # DFINEDecoder: hd=256, nl=4
+  - [[21, 24, 27], 1, DFINEDecoder, [nc, 256, 300, 8, 4]]

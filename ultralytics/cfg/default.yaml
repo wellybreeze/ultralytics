@@ -41,6 +41,30 @@ multi_scale: 0.0 # (float) multi-scale range as a fraction of imgsz; sizes are r
 compile: False # (bool | str) enable torch.compile() backend='inductor'; True="default", False=off, or "default|reduce-overhead|max-autotune-no-cudagraphs"
 channels_last: False # (bool) use channels_last (NHWC) memory format for conv train/inference; CUDA-only, speeds up Tensor-Core GPUs
 
+# WeDetect settings ----------------------------------------------------------------------------------------------------
+freeze_text_encoder: True # (bool) freeze XLM-RoBERTa during training; False=open-vocabulary fine-tuning (update with text_lr_mult)
+text_lr_mult: 0.01 # (float) learning rate multiplier for text encoder when freeze_text_encoder=False
+mix_global_texts: True # (bool) WeDetect: merge multi-dataset class_texts by synonym overlap (category-id agnostic)
+use_neg_queue: False # (bool) WeDetect: shared NegQueue across subsets for dynamic negative class texts
+close_set: False # (bool) close-set fine-tuning: discard text encoder, use cached class embeddings
+mask_refine: False # (bool) refine boxes from segmentation masks (WeDetect mask2bbox); requires segment-format labels
+# Pseudo-label global fallbacks — prefer setting these on the dataset YAML instead
+pseudo_label: False # (bool) used only when dataset YAML omits pseudo_label
+pseudo_label_model: sam3.pt # (str) teacher fallback (YOLO / WeDetect / D-FINE / SAM3)
+pseudo_label_classes: "" # (str) teacher class file fallback; empty = COCO names
+pseudo_label_class_texts: "" # (str) Chinese class_texts fallback; empty = coco_zh
+pseudo_label_conf: 0.25 # (float) teacher conf fallback
+pseudo_label_batch: 0 # (int) batch fallback; 0=auto from free VRAM
+pseudo_label_mem_fraction: 0.85 # (float) free-VRAM fraction fallback
+pseudo_label_imgsz: 640 # (int) teacher inference size; independent of train imgsz
+pseudo_label_flush_every: 200 # (int) incremental teacher-cache flush interval (images)
+pseudo_label_prefetch: 2 # (int) loader batches to prefetch ahead of GPU inference; 0=off
+val_fitness_dynamic: False # (bool) mixed val: epoch 2+ reweight best.pt fitness by prior mAP50-95 gaps
+val_fitness_lvis_target_mult: 2.0 # (float) mixed val dynamic: LVIS target = mult × mean customer mAP50-95
+val_fitness_dynamic_ema: 0.5 # (float) EMA for dynamic val weights; 0=off, 1=freeze after first update
+val_fitness_weight_clip_min: 0.5 # (float) min raw dynamic weight before normalization
+val_fitness_weight_clip_max: 20.0 # (float) max raw dynamic weight before normalization
+
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)
 mask_ratio: 4 # (int) mask downsample ratio (segment only)
@@ -90,6 +114,9 @@ dynamic: False # (bool) dynamic shapes for torchscript, onnx, openvino, engine, 
 simplify: True # (bool) supported ONNX-based exports (see export table); simplify intermediate ONNX graph
 opset: # (int, optional) supported ONNX-based exports (see export table); intermediate ONNX opset version
 workspace: # (float, optional) engine (TensorRT) only; workspace size in GiB, e.g. 4
+builder_optimization_level: # (int, optional) engine (TensorRT) only; 0-5, same as trtexec --builderOptimizationLevel (default 3); higher = slower build, often faster engine
+export_mode: dual # (str) WeDetect ONNX layout: dual (vision+language) or whole (fused); tokenizer stays in Python
+max_classes: 80 # (int) WeDetect dual TensorRT class-count ceiling (txt_feats profile / EfficientNMS pad); prompts may change
 nms: False # (bool) fuse NMS into exported model when backend supports; if True, conf/iou/agnostic_nms apply
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
@@ -97,9 +124,11 @@ lr0: 0.01 # (float) initial learning rate (SGD=1e-2, Adam/AdamW=1e-3)
 lrf: 0.01 # (float) final LR fraction; final LR = lr0 * lrf
 momentum: 0.937 # (float) SGD momentum or Adam beta1
 weight_decay: 0.0005 # (float) weight decay (L2 regularization)
-warmup_epochs: 3.0 # (float) warmup epochs (fractions allowed)
+warmup_epochs: 3.0 # (float) warmup epochs (fractions allowed); ignored when warmup_iters > 0
+warmup_iters: 0 # (int) iteration-based warmup; if >0 overrides warmup_epochs (WeDetect: 1000)
 warmup_momentum: 0.8 # (float) initial momentum during warmup
-warmup_bias_lr: 0.1 # (float) bias learning rate during warmup
+warmup_bias_lr: 0.1 # (float) bias learning rate during warmup (ignored when warmup_start_factor > 0)
+warmup_start_factor: 0.0 # (float) start LR = factor * initial_lr for all groups when >0 (WeDetect: 0.001)
 distill_model: # (str, optional) path to teacher model for knowledge distillation
 dis: 6.0 # (float) distillation loss weight
 box: 7.5 # (float) box loss gain

@@ -178,6 +178,7 @@ nav:
       - D-FINE (Fine-grained Distribution Refinement): models/dfine.md
       - YOLO-World: models/yolo-world.md
       - YOLOE (Real-Time Seeing Anything): models/yoloe.md
+      - WeDetect (Open-Vocabulary ConvNeXt): models/wedetect.md
   - Compare:
       - compare/index.md
       - YOLO26:
@@ -474,6 +475,7 @@ nav:
       - Train & fine-tune:
           - Tips for Model Training: guides/model-training-tips.md
           - Fine-Tuning YOLO on Custom Data: guides/finetuning-guide.md
+          - WeDetect Open-Vocabulary Fine-Tune: guides/wedetect-ov-finetune.md
           - YOLO26 Training Recipe: guides/yolo26-training-recipe.md
           - Hyperparameter Tuning: guides/hyperparameter-tuning.md
           - Knowledge Distillation 🚀: guides/knowledge-distillation.md

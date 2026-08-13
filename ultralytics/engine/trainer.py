@@ -199,8 +199,23 @@ class BaseTrainer:
         self.csv = self.save_dir / "results.csv"
         if self.csv.exists() and not self.args.resume:
             self.csv.unlink()
-        self.plot_idx = [0, 1, 2]
+        self._plot_milestones: set[tuple[int, int]] = set()
         self.nan_recovery_attempts = 0
+
+    def _init_plot_milestones(self) -> None:
+        """Build epoch/batch plot triggers; stable when ``nb`` changes (e.g. OOM batch reduce)."""
+        milestones: set[tuple[int, int]] = set()
+        if self.start_epoch == 0:
+            milestones.update((0, i) for i in range(3))
+        if self.args.close_mosaic:
+            cm_epoch = self.epochs - self.args.close_mosaic
+            if cm_epoch >= self.start_epoch:
+                milestones.update((cm_epoch, i) for i in range(3))
+        self._plot_milestones = milestones
+
+    def _should_plot_training_batch(self, epoch: int, batch_i: int) -> bool:
+        """True when this train batch should be saved as ``train_batch*.jpg``."""
+        return (epoch, batch_i) in self._plot_milestones
 
     def add_callback(self, event: str, callback):
         """Append the given callback to the event's callback list."""
@@ -445,9 +460,7 @@ class BaseTrainer:
             f"Logging results to {colorstr('bold', self.save_dir)}\n"
             f"Starting training for " + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
         )
-        if self.args.close_mosaic:
-            base_idx = (self.epochs - self.args.close_mosaic) * nb
-            self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        self._init_plot_milestones()
         epoch = self.start_epoch
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         self._oom_retries = 0  # OOM auto-reduce counter for first epoch
@@ -585,7 +598,7 @@ class BaseTrainer:
                         )
                     )
                     self.run_callbacks("on_batch_end")
-                    if self.args.plots and ni in self.plot_idx:
+                    if self.args.plots and self._should_plot_training_batch(epoch, i):
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")

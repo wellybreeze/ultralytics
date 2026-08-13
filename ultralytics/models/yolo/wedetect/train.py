@@ -80,6 +80,11 @@ class WeDetectTrainer(DetectionTrainer):
         self.training_data = None  # filled by get_dataset() for mixed yaml
         self.validation_data = None  # path -> data dict for mixed multi-val
         self._val_fitness_weights_cfg = None  # optional list from mixed yaml
+        self._val_fitness_dynamic = False  # epoch 2+ reweight by prior val mAP50-95
+        self._val_fitness_lvis_target_mult = 2.0
+        self._val_fitness_dynamic_ema = 0.5
+        self._val_fitness_weight_clip = (0.5, 20.0)
+        self._dynamic_val_weights: list[float] | None = None
         self._train_data_override = None  # single-dataset pseudo-label train view
         super().__init__(cfg, overrides, _callbacks)
         if getattr(self.args, "close_set", False):
@@ -369,6 +374,23 @@ class WeDetectTrainer(DetectionTrainer):
             self.validation_data[str(vpath)] = d
         # Optional per-set weights from mixed yaml: val_fitness_weights: [0.5, 0.3, 0.2]
         self._val_fitness_weights_cfg = data_yaml.get("val_fitness_weights")
+        self._val_fitness_dynamic = bool(
+            data_yaml.get("val_fitness_dynamic", getattr(self.args, "val_fitness_dynamic", False))
+        )
+        self._val_fitness_lvis_target_mult = float(
+            data_yaml.get("val_fitness_lvis_target_mult", getattr(self.args, "val_fitness_lvis_target_mult", 2.0))
+        )
+        self._val_fitness_dynamic_ema = float(
+            data_yaml.get("val_fitness_dynamic_ema", getattr(self.args, "val_fitness_dynamic_ema", 0.5))
+        )
+        clip_min = float(
+            data_yaml.get("val_fitness_weight_clip_min", getattr(self.args, "val_fitness_weight_clip_min", 0.5))
+        )
+        clip_max = float(
+            data_yaml.get("val_fitness_weight_clip_max", getattr(self.args, "val_fitness_weight_clip_max", 20.0))
+        )
+        self._val_fitness_weight_clip = (min(clip_min, clip_max), max(clip_min, clip_max))
+        self._dynamic_val_weights = None
 
         primary = data["val"][0]
         final_data["val"] = final_data["val"][0]  # default loader / BaseTrainer expects a single path
@@ -418,20 +440,26 @@ class WeDetectTrainer(DetectionTrainer):
             self.training_data[d["train"]] = d
         n_val = len(self.validation_data)
         w = self._val_fitness_weights(n_val)
+        dyn = f", dynamic={'on' if self._val_fitness_dynamic else 'off'}" if n_val > 1 else ""
         LOGGER.info(
             f"{colorstr('WeDetect:')} mixed data config with {len(data['train'])} YOLO "
             f"+ {len(final_data['train']) - len(data['train'])} grounding train subsets, "
-            f"{n_val} val set(s) (fitness weights={['%.3f' % x for x in w]})"
+            f"{n_val} val set(s) (fitness weights={['%.3f' % x for x in w]}{dyn})"
         )
         # Pseudo-label hook runs in get_dataset() after this returns
         return final_data
 
-    def _val_fitness_weights(self, n: int) -> list[float]:
-        """Per-val-set fitness weights; default equal share. Normalized to sum=1.
+    @staticmethod
+    def _is_lvis_val(vdata: dict) -> bool:
+        """True when a mixed val subset is LVIS (path/val/minival/yaml_file contains ``lvis``)."""
+        for key in ("val", "path", "yaml_file", "minival"):
+            val = vdata.get(key)
+            if val is not None and "lvis" in str(val).lower():
+                return True
+        return False
 
-        Source (first hit): mixed yaml ``val_fitness_weights`` stored at dataset load,
-        or ``args.val_fitness_weights``. Length must match ``n`` or equal weights are used.
-        """
+    def _static_val_fitness_weights(self, n: int) -> list[float]:
+        """Per-val-set fitness weights from yaml/args; default equal share (sum=1)."""
         if n <= 0:
             return []
         raw = getattr(self, "_val_fitness_weights_cfg", None)
@@ -447,6 +475,58 @@ class WeDetectTrainer(DetectionTrainer):
             return [1.0 / n] * n
         s = sum(w)
         return [x / s for x in w]
+
+    def _val_fitness_weights(self, n: int) -> list[float]:
+        """Return weights for combined val fitness (normalized to sum=1).
+
+        When ``val_fitness_dynamic`` is enabled, epoch 1 uses static yaml weights; later
+        epochs use weights derived from the previous validation mAP50-95 per subset.
+        """
+        if n <= 0:
+            return []
+        dyn = getattr(self, "_dynamic_val_weights", None)
+        if getattr(self, "_val_fitness_dynamic", False) and dyn is not None and len(dyn) == n:
+            return dyn
+        return self._static_val_fitness_weights(n)
+
+    def _update_dynamic_val_fitness_weights(self, fitnesses: list[float], val_vdata: list[dict]) -> None:
+        """Recompute per-subset weights from mAP50-95 gaps to a shared target (LVIS target = mult × avg)."""
+        n = len(fitnesses)
+        if n == 0 or not getattr(self, "_val_fitness_dynamic", False):
+            return
+
+        is_lvis = [self._is_lvis_val(v) for v in val_vdata]
+        maps = [max(float(f), 1e-6) for f in fitnesses]
+        if any(is_lvis):
+            customer_maps = [m for m, lvis in zip(maps, is_lvis) if not lvis]
+            avg = sum(customer_maps) / len(customer_maps) if customer_maps else sum(maps) / n
+            lvis_mult = float(getattr(self, "_val_fitness_lvis_target_mult", 2.0))
+            targets = [lvis_mult * avg if lvis else avg for lvis in is_lvis]
+        else:
+            avg = sum(maps) / n
+            targets = [avg] * n
+
+        w_min, w_max = getattr(self, "_val_fitness_weight_clip", (0.5, 20.0))
+        raw = [max(w_min, min(w_max, t / m)) for t, m in zip(targets, maps)]
+        s = sum(raw)
+        new_w = [x / s for x in raw] if s > 0 else [1.0 / n] * n
+
+        ema = float(getattr(self, "_val_fitness_dynamic_ema", 0.5))
+        prev = getattr(self, "_dynamic_val_weights", None)
+        if prev is not None and len(prev) == n and 0.0 < ema < 1.0:
+            new_w = [ema * nw + (1.0 - ema) * ow for nw, ow in zip(new_w, prev)]
+            s = sum(new_w)
+            new_w = [x / s for x in new_w] if s > 0 else [1.0 / n] * n
+
+        self._dynamic_val_weights = new_w
+        tags = [self._val_metric_tag(v, i) for i, v in enumerate(val_vdata)]
+        detail = ", ".join(
+            f"{t}=w{w:.3f}(mAP={m:.4f},tgt={tg:.4f})" for t, w, m, tg in zip(tags, new_w, maps, targets)
+        )
+        LOGGER.info(
+            f"{colorstr('WeDetect val:')} dynamic fitness weights updated "
+            f"(avg_mAP={avg:.4f}, lvis={'yes' if any(is_lvis) else 'no'}) → {detail}"
+        )
 
     def validate(self):
         """Run validation; support multiple mixed ``val.yolo_data`` entries.
@@ -538,10 +618,14 @@ class WeDetectTrainer(DetectionTrainer):
 
         if self.best_fitness is None or self.best_fitness < combined:
             self.best_fitness = combined
+
+        if getattr(self, "_val_fitness_dynamic", False):
+            val_vdata = [v for _, v in val_items]
+            self._update_dynamic_val_fitness_weights(fitnesses, val_vdata)
         return metrics_all, combined
 
     def final_eval(self):
-        """Final val on ``best.pt`` across all mixed val sets (equal-weight fitness).
+        """Final val on ``best.pt`` across all mixed val sets (weighted fitness).
 
         During training ``get_dataset`` replaces ``args.data`` with the mixed yaml
         dict. Standalone ``validator(model=best.pt)`` needs concrete yaml paths.

@@ -12,7 +12,7 @@ Welcome to Ultralytics' model documentation! We offer support for a wide range o
 
 ## Featured Models
 
-Start with [YOLO26](yolo26.md) for a new project: it is the latest Ultralytics release and the only one covering all seven tasks. [YOLO11](yolo11.md) is the mature alternative, with pretrained checkpoints for each of its five tasks. Pick a specialized family only when you need promptable segmentation ([SAM 3](sam-3.md)), open-vocabulary detection ([YOLOE](yoloe.md), [YOLO-World](yolo-world.md)), or a transformer detector ([RT-DETR](rtdetr.md), [RF-DETR](rfdetr.md), [D-FINE](dfine.md)).
+Start with [YOLO26](yolo26.md) for a new project: it is the latest Ultralytics release and the only one covering all seven tasks. [YOLO11](yolo11.md) is the mature alternative, with pretrained checkpoints for each of its five tasks. Pick a specialized family only when you need promptable segmentation ([SAM 3](sam-3.md)), open-vocabulary detection ([YOLOE](yoloe.md), [YOLO-World](yolo-world.md), [WeDetect](wedetect.md)), or a transformer detector ([RT-DETR](rtdetr.md), [RF-DETR](rfdetr.md), [D-FINE](dfine.md)).
 
 The table lists every documented model with the tasks it covers, which of the [train, val, predict and export](../modes/index.md) modes Ultralytics supports for it, and when to choose it. [Track](../modes/track.md) is not listed separately: it runs on top of predict for Detect, Segment, Pose and OBB models, while SAM 2 and SAM 3 track through their own video predictors. [Benchmark](../modes/benchmark.md) is not listed either, because it wraps export and val across formats rather than adding support of its own.
 
@@ -40,6 +40,7 @@ The table lists every documented model with the tasks it covers, which of the [t
 | **[D-FINE](dfine.md)**          | Detect                                                | Train, Val, Predict, Export | Fine-grained Distribution Refinement DETR detector (HGNetv2 + FDR decoder) with native Ultralytics train/val/predict/export                                                                      |
 | **[YOLO-World](yolo-world.md)** | Detect                                                | Train, Val, Predict, Export | Open-vocabulary detection from text prompts (Tencent AI Lab); export requires the `-worldv2` checkpoints                                                                                         |
 | **[YOLOE](yoloe.md)**           | Detect, Segment                                       | Train, Val, Predict, Export | Open-vocabulary detection and segmentation with text, visual, or prompt-free inference                                                                                                           |
+| **[WeDetect](wedetect.md)**     | Detect                                                | Train, Val, Predict, Export | Open-vocabulary detection with ConvNeXt + XLM-RoBERTa, mixed YOLO subsets, optional D-FINE/SAM3 pseudo labels, and dual vision/language export                                                   |
 
 <p align="center">
     <br>
@@ -62,7 +63,7 @@ Note the below example spotlights YOLO26 [Detect](../tasks/detect.md) models for
 
     === "Python"
 
-        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()`, `RTDETR()`, `RFDETR()` and `DFINE()` classes to create a model instance in Python:
+        [PyTorch](https://www.ultralytics.com/glossary/pytorch) pretrained `*.pt` models as well as configuration `*.yaml` files can be passed to the `YOLO()`, `SAM()`, `NAS()`, `RTDETR()`, `RFDETR()`, `DFINE()` and `WeDetect()` classes to create a model instance in Python:
 
         ```python
         from ultralytics import YOLO

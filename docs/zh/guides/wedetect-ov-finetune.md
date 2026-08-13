@@ -2,7 +2,9 @@
 
 本文面向当前仓库中的 **Ultralytics WeDetect**，说明从数据准备、配置修改、Python 开放词汇（OV）微调、ONNX 导出到测试验证的完整流程。行为对齐原版 WeDetect 的 full_tuning（保留并更新 XLM-RoBERTa 文本塔）。
 
-> 工作目录默认：`ultralytics/`（即本仓库中含 `pretrained_weights/`、`ultralytics/` 包的那一层）。
+架构与 API 摘要：[models/wedetect.md](../models/wedetect.md)。英文模型页 / 流程摘要：[docs/en/models/wedetect.md](../../en/models/wedetect.md)、[docs/en/guides/wedetect-ov-finetune.md](../../en/guides/wedetect-ov-finetune.md)。D-FINE 教师与独立训练见 [models/dfine.md](../models/dfine.md)。
+
+> 工作目录默认：仓库根（含 `pretrained_weights/`、`ultralytics/` 包的那一层）。
 
 ---
 
@@ -11,7 +13,10 @@
 ```text
 准备 YOLO 格式数据 + 中文 class_texts（可选 grounding JSON）
         ↓
-单集 yaml 或 wedetect_mixed.yaml；cfg=wedetect_finetune.yaml
+单集 yaml 或 wedetect_mixed.yaml / wedetect_mixed_customer.yaml
+cfg=wedetect_finetune.yaml
+        ↓
+可选：教师伪标签（SAM3 / YOLO / WeDetect / D-FINE；分辨率=pseudo_label_imgsz）
         ↓
 Python: WeDetect(...).train(...)   # freeze_text_encoder=False
         ↓
@@ -341,6 +346,7 @@ yolo cfg=ultralytics/cfg/wedetect_finetune.yaml \
 1. `WeDetectTrainer.setup_model`：在 `freeze_text_encoder=False` 时 `register_text_model()`，文本塔进入 `model.parameters()`。
 2. 每个 batch：**在线** `encode_texts`（不走冻结缓存），文本塔带梯度，`lr *= text_lr_mult`。
 3. `save_model` / `strip_optimizer`：调用 `sync_text_model_weights()`，把 LM 写回 `_text_sd`，并在 `.pt` 顶层写入 **`text_model_weights`**，保证导出/再加载一致。
+4. 单卡 **第一个 epoch** 若 CUDA OOM：`batch` 自动减半并重建 pipeline（最多 3 次）。建议一开始就把 `batch` 设到能放下的值，避免反复 Scanning cache。
 
 训练结束后权重通常在：
 
@@ -373,13 +379,13 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 | 文件                           | 位置                                                                                    | 说明                                                                                         |
 | ------------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `pseudo_labels-{model}.cache` | 数据集`path` 根目录                                                                   | 仅教师伪标（如 `sam3.pt` → `pseudo_labels-sam3.cache`）；`cls` 已 remap 为 `nc_gt+k`；归一化 xywh；含 `version`/`hash`/`labels` |
-| `labels_pseudo_merged.cache` | 与 YOLO 约定一致：`…/labels_pseudo_merged.cache`（`labels_pseudo_merged/` 目录旁） | GT+伪标合并；格式同`YOLODataset.cache_labels`（`DATASET_CACHE_VERSION=1.0.3`）           |
+| `labels_pseudo_merged.cache` | 与 YOLO 约定一致：`…/labels_pseudo_merged.cache`（`labels_pseudo_merged/` 目录旁） | GT+伪标合并；格式同 `YOLODataset.cache_labels`（`DATASET_CACHE_VERSION`，当前 **`1.0.4`**） |
 | `pseudo_label_meta.json`     | 数据集`path` 根目录                                                                   | 幂等元信息：词表 hash、`kept_src_ids`、`conf`、两份 cache 路径/hash、`nc_gt`/`nc` 等 |
 | `<stem>_train.json`          | 与 yaml`class_texts` 同目录                                                           | 合并词表（GT + 伪标中文 + leftover 负类）；**不覆盖**原 JSON；训练/微调优先用此文件    |
 
 `get_labels`：伪标合并 cache 用**相对路径可移植 hash**（`merged_cache_hash` / `path_mode=rel_v1`）校验；命中后把 `labels[].im_file` **remap** 到本机当前绝对路径。若合并 cache 失效但 `pseudo_labels-{model}.cache` 仍在（或 meta 中记录的路径仍可读），则调用 `rebuild_merged_pseudo_cache` 从伪标 cache + GT **重合并**（不跑教师、不扫空 txt）；两者皆无则报错提示重新开启数据集侧 `pseudo_label`。
 
-**增量写入 / 断点续跑：** 每处理 `PSEUDO_FLUSH_EVERY`（默认 50）张图后原子写入 `pseudo_labels-{model_stem}.cache`；结束时强制 flush。YOLO/WeDetect 将路径写入临时 `.txt` 再 `predict`（**禁止**把路径 list 直接传入，否则 Ultralytics 会 `LoadPilAndNumpy` 把整表当成一个超大 batch）。`rect=False` 固定 640 方图 letterbox，显存更稳。
+**增量写入 / 断点续跑：** 每处理 `pseudo_label_flush_every`（默认 **200**，代码常量 `PSEUDO_FLUSH_EVERY`）张图后原子写入 `pseudo_labels-{model_stem}.cache`；结束时强制 flush。YOLO/WeDetect/D-FINE 将路径写入临时 `.txt` 再 `predict`（**禁止**把路径 list 直接传入，否则 Ultralytics 会 `LoadPilAndNumpy` 把整表当成一个超大 batch）。教师分辨率由 **`pseudo_label_imgsz`（默认 640）** 决定，**与训练 `imgsz` 解耦**；D-FINE 使用 `LetterBox(scale_fill=True)` 方图。`pseudo_label_prefetch`（默认 2）在 GPU 推理前预取 loader batch。
 
 **跨机复用：** 只要数据集相对布局不变（相对 `path` 的 `images/`、`labels/` 等），绝对挂载点不同也可直接拷贝 `pseudo_labels-*.cache` / `labels_pseudo_merged.cache` / `pseudo_label_meta.json`。hash 基于相对路径键 + 文件 size，模型/词表配置用 basename；加载时 remap `im_file`。旧版绝对路径 hash 的 cache 会 miss 一次并自动按新逻辑重建。
 
@@ -396,23 +402,30 @@ print("text_model_weights" in ckpt, len(ckpt.get("text_model_weights") or {}))
 | `pseudo_label_classes`      | 空 →`coco.yaml` 的 `names`   | 教师英文/源词表（与下项同序）                                                           |
 | `pseudo_label_class_texts`  | 空 →`coco_zh_class_texts.json` | 同序中文伪标词表；**写入合并 `class_texts` 的是中文**                           |
 | `pseudo_label_conf`         | `0.25`                          | 教师置信度阈值                                                                          |
-| `pseudo_label_batch`        | `0`（自动）                     | `≤0`：按空闲显存自动；`>0`：固定。YOLO/WeDetect=图像 batch；SAM3=文本 prompt chunk |
-| `pseudo_label_mem_fraction` | `0.85`                          | 自动 batch 时占用空闲显存的目标比例，钳制到`[0.1, 0.95]`                              |
-| `imgsz`                     | 训练`imgsz`（数据集可覆盖）     | 教师推理分辨率                                                                          |
+| `pseudo_label_batch`        | `0`（自动）                     | `≤0`：按空闲显存自动；`>0`：固定。YOLO/WeDetect/D-FINE=图像 batch；SAM3=文本 prompt chunk |
+| `pseudo_label_mem_fraction` | `0.85`                          | 自动 batch 时占用空闲显存的目标比例，钳制到 `[0.1, 0.95]`                              |
+| `pseudo_label_imgsz`        | `640`                           | **教师推理分辨率，与训练 `imgsz` 无关**；写入教师 cache hash，改了会 miss          |
+| `pseudo_label_flush_every`  | `200`                           | 教师 cache 增量 flush 间隔（张）                                                        |
+| `pseudo_label_prefetch`     | `2`                             | GPU 推理前预取的 loader batch 数；`0` 关闭                                              |
 
-示例（写在 [`wedetect_vehicle.yaml`](../../../ultralytics/cfg/datasets/customer/wedetect_vehicle.yaml)）：
+示例（写在子集 YAML，如 [`vehicle.yaml`](../../../ultralytics/cfg/datasets/customer/vehicle.yaml)）：
 
 ```yaml
 names:
   0: 车
-class_texts: .../wedetect_vehicle_txt.json
+class_texts: vehicle_txt.json
 
 pseudo_label: true
-pseudo_label_model: sam3.pt
-pseudo_label_conf: 0.25
-pseudo_label_batch: 0
-pseudo_label_mem_fraction: 0.85
+pseudo_label_model: ./pretrained_weights/dfine-x-obj365.pt # 或 sam3.pt / yolo11x.pt / wedetect_*.pt
+pseudo_label_classes: Objects365.yaml # D-FINE-Obj365；COCO 教师可省略（默认 coco names）
+pseudo_label_class_texts: texts/objects365_zh_class_texts.json
+pseudo_label_conf: 0.2
+pseudo_label_batch: 20 # 0=按空闲显存自动
+pseudo_label_mem_fraction: 0.8
+pseudo_label_imgsz: 1280 # 默认 640；可与训练 imgsz=1280 相同或更小
 ```
+
+**D-FINE 教师：** Objects365 权重头为 `nc=366`，下标 `0` 保留为 background，按英文类名对齐到 head id（不是 YOLO 本地 `class_id`）。预处理为方形 `scale_fill` letterbox + `/255`（无 ImageNet mean/std）。解码器 anchors 随特征图尺寸重建，因此 `pseudo_label_imgsz≠640` 可用。独立训练/导出 D-FINE 见 [models/dfine.md](../models/dfine.md)。
 
 教师 batch 策略：
 
@@ -424,9 +437,9 @@ pseudo_label_mem_fraction: 0.85
 ```text
 冲突处理 + 词表排序
   → 写出 <stem>_train.json（原 class_texts 不动）
-  → 教师推理（动态 batch / prompt chunk）
+  → 教师推理（pseudo_label_imgsz；动态 batch / prompt chunk；prefetch）
   → 写 pseudo_labels-{model_stem}.cache
-  → 加载 GT（优先 labels.cache，否则扫 labels/*.txt）
+  → 加载 GT（按 shard 复用 labels.cache，缺则并行扫 labels/*.txt）
   → 合并写 labels_pseudo_merged.cache
   → 更新 data: labels_dir / nc / names / class_texts→*_train.json
 ```
@@ -437,21 +450,23 @@ pseudo_label_mem_fraction: 0.85
 2. **同义冲突丢弃**：伪标类与 GT 全量同义词相交 → 整类不推理、不占新 id
 3. **无冲突伪标后移**：按伪标词表原相对顺序追加，新 id = `nc_gt + k`；`new_nc = nc_gt + K`
 4. **原负类行**：超出 `nc` 的 `class_texts` 行接到伪标段之后（与已接纳伪标无同义重叠），仅作 OV 负样本，不增加 `nc`
-5. **写出**：`new_texts = GT前缀 + kept_zh + leftover负类` → 旁路 `<stem>_train.json`（如 `wedetect_vehicle_txt_train.json`）；无 `class_texts` 时新建 `path/class_texts_train.json`。原 JSON **不修改**
+5. **写出**：`new_texts = GT前缀 + kept_zh + leftover负类` → 旁路 `<stem>_train.json`（如 `vehicle_txt_train.json`）；无 `class_texts` 时新建 `path/class_texts_train.json`。原 JSON **不修改**
 
 框合并：伪框 `cls` 已是 `nc_gt+k` 时与 GT 直接拼接；**仅类别级去重，无 IoU 空间抑制**。混数时每个 train 子集各自写出自己的 `*_train.json` 与两份 cache。
 
 val：仍 `labels_dir=labels`，指标按原 `names/nc`。若旁路 `*_train.json` 已存在，加载数据集时会**自动优先**用它作为 `class_texts`（yaml 可仍写原路径）。
 
-幂等：`pseudo_label_meta.json` 的 hash + 两份 cache 的 version/hash + 磁盘 `*_train.json` 内容一致 → 跳过推理与合并。
+幂等：`pseudo_label_meta.json` 的 hash + 两份 cache 的 **version/hash** + 磁盘 `*_train.json` 内容一致 → 跳过推理与合并。`apply_pseudo_labels_to_subset` 里 `try_load_cache` **要求 version 与当前 `DATASET_CACHE_VERSION`（1.0.4）完全一致**；旧 `1.0.3` cache 会 miss 并重跑教师。训练侧 `YOLODataset.get_labels()` 对 `labels_pseudo_merged.cache` 更宽松：hash 匹配时允许版本不同；merged 失效但教师 cache 仍在时，会 `rebuild_merged_pseudo_cache`（只合并不推理）。
+
+`merged_cache` 路径优先读 meta 里记录的位置，避免 `train.txt` 第一张图目录与真实子集根不一致导致找不到 cache。
 
 ```python
 from ultralytics import WeDetect
 
-# 伪标开关与教师参数写在数据集 YAML（如 wedetect_vehicle.yaml）即可
+# 伪标开关与教师参数写在数据集 YAML（如 customer/vehicle.yaml）即可
 model = WeDetect("pretrained_weights/wedetect_base.pt")
 model.train(
-    data="ultralytics/cfg/datasets/customer/wedetect_vehicle.yaml",
+    data="ultralytics/cfg/datasets/customer/vehicle.yaml",
     cfg="ultralytics/cfg/wedetect_finetune.yaml",
     freeze_text_encoder=False,
     # 可选：仅当数据集 YAML 未写对应键时，以下 train args 才生效
@@ -469,7 +484,11 @@ model.train(
 训练过程中若 `val=True` 会自动验证。
 
 - **单集**：按该 yaml 的 `nc` / `names` / `class_texts`（仅前 `nc` 行）编码提示词后评测。
-- **混数 `val.yolo_data`**：每个 epoch 与 `final_eval` 会**逐集**切换 `nc`/`names`/`class_texts` 并重建 dataloader；`best.pt` 的 fitness 为各集加权平均（默认平分，可用 `val_fitness_weights`）。LVIS 自动优先 `minival`。
+- **混数 `val.yolo_data`**：每个 epoch 与 `final_eval` 会**逐集**切换 `nc`/`names`/`class_texts` 并重建 dataloader。
+    - **`best.pt` 的 `fitness`（无前缀）= 各集 mAP50-95 加权平均**（默认平分；YAML `val_fitness_weights` 与 `val.yolo_data` 同序）。
+    - `val_fitness_dynamic: true` 时：epoch 1 用静态权重；epoch 2+ 按上一轮 mAP 调权。含 LVIS 时，LVIS 目标 = `val_fitness_lvis_target_mult ×` 客户子集均值（默认 2.0）。
+    - `results.csv` 无前缀 `metrics/*` 是 **第一个 val 集的拷贝**（给默认曲线图），**不是**综合指标。例如第一项是 LVIS 时，`metrics/mAP50-95(B)` 与 `lvis/metrics/mAP50-95(B)` 会完全相同。
+    - 各子集指标带 `<数据集目录名>/` 前缀。LVIS 自动优先 `minival`。
 - 独立 `model.val(...)` / `final_eval` 走 `WeDetectValidator` 时会按当前 `args.data` 清空旧 dataloader，避免「指标按 A 集、标签却仍是 B 集」的错位（例如混淆矩阵 `IndexError: index 1201 is out of bounds`）。
 
 单独评测：
@@ -687,7 +706,7 @@ python examples/WeDetect-ONNXRuntime/wedetect_onnx_infer.py \
 - [ ] 图像与 `labels/*.txt` 一一对应，`class_id` 与 `names`/`class_texts` 前 `nc` 行对齐
 - [ ] `class_texts` JSON 长度 **≥ `nc`**（多出行作 OV 负类）；近义可同行，**属性勿与基类同行**
 - [ ] 已安装 `transformers` + `sentencepiece`；仓库根无空的 `xlm-roberta-base/`
-- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels-{model}.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）
+- [ ] 若数据集 YAML 启用伪标：出现 `pseudo_labels-{model}.cache` / `labels_pseudo_merged.cache`，且旁路写出 `*_train.json`（原 `class_texts` 不变）；教师分辨率看 `pseudo_label_imgsz`（默认 640）
 - [ ] `cfg=wedetect_finetune.yaml` 且 `freeze_text_encoder=False`，日志中出现文本塔 register / 独立 param group
 - [ ] `best.pt` 完整（体积与同系列完整权重同量级，约数 GB）且含非空 `text_model_weights`
 - [ ] `model.val(...)` / 混数多集验证指标合理
@@ -721,14 +740,26 @@ YOLO 微调若只把「红色车」写进「车」的同义组，会学成同义
 **Q: mask refine 无效？**
 检查标签是否为带多边形的 segment 格式，且配置为 `mask_refine=True`。
 
+**Q: D-FINE 教师跑到一半 OOM？**
+已写入 `committed_paths` 后，D-FINE/YOLO 教师路径不会自动把 batch 减半重试。调低 `pseudo_label_batch` 后重新启动；增量 cache 会从已 flush 的进度续跑。
+
 **Q: 伪标签很慢 / 显存打不满？**
-确认 `pseudo_label_batch=0`（自动）。YOLO/WeDetect 会按空闲显存抬图像 batch；SAM3 只能逐图，但会加大 prompt chunk。也可手动设 `pseudo_label_batch` 与 `pseudo_label_mem_fraction`。
+确认 `pseudo_label_batch=0`（自动）。YOLO/WeDetect/D-FINE 会按空闲显存抬图像 batch；SAM3 只能逐图，但会加大 prompt chunk。也可手动设 `pseudo_label_batch` 与 `pseudo_label_mem_fraction`。教师分辨率用 `pseudo_label_imgsz`（默认 640），不必等于训练 `imgsz`。
 
 **Q: 伪标签后找不到每图 txt？**
 正常。当前实现只写 `pseudo_labels-{model_stem}.cache` 与 `labels_pseudo_merged.cache`，不再落盘 `labels_pseudo_merged/*.txt`。
 
 **Q: 伪标 cache 换机器后是否要重跑教师？**
 不必，只要相对 `path` 的目录布局与文件 size 不变。当前 hash 为可移植相对路径（`path_mode=rel_v1`）；加载时会把 `im_file` remap 到本机路径。旧绝对路径 hash 的 cache 会 miss 一次并自动重建。
+
+**Q: 为何启动训练又开始跑 D-FINE / 伪标签？**
+`apply_pseudo_labels` 的 cache hit 要求 meta hash、`*_train.json`、merged cache、教师 cache **version+hash** 都过。`DATASET_CACHE_VERSION` 从 `1.0.3` 升到 `1.0.4` 时，旧教师 cache 会被当成无效并全量重推理。这不是业务上必须重标。`get_labels` 读 merged cache 时 hash 匹配可容忍版本差；merged 丢了才会从教师 cache + GT 重合并（仍不跑教师）。
+
+**Q: 无前缀 `metrics/mAP50-95(B)` 和 `lvis/metrics/...` 为什么一样？**
+混数把 **第一个** val 集再写一份无前缀列，给默认 CSV/曲线用。第一项是 LVIS 时两列相同。选 `best.pt` 看无前缀 **`fitness`**（加权平均），不要把无前缀 mAP 当综合成绩。
+
+**Q: 日志里 `CUDA out of memory ... Reducing to batch=` 然后反复 Scanning cache？**
+单卡第一个 epoch 的 OOM 自适应：batch 减半并重建 dataloader/optimizer（最多 3 次）。这是读已有 merged cache，不是重跑教师。建议一开始就把 `batch` 设到能放下的值（1280 上 4090 常见最终 `batch=2`）。
 
 **Q: 微调权重加载后提示词效果像随机初始化？**
 检查 `.pt` 是否含 `text_model_weights`；`load` / `load_checkpoint` 应回填 `_text_sd`。旧 checkpoint 若缺该字段，需重新用当前代码训练保存。
@@ -741,7 +772,7 @@ Ultralytics WeDetect 已增强混数能力，对齐原版「**文本当 ID**」�
 
 ### 12.1 数据 YAML 格式
 
-见 `ultralytics/cfg/datasets/wedetect_mixed.yaml`：
+见 `ultralytics/cfg/datasets/wedetect_mixed.yaml`（客户多任务示例：`wedetect_mixed_customer.yaml`）：
 
 ```yaml
 train:
@@ -752,7 +783,9 @@ val:
   yolo_data:
     - my_domain.yaml
     - coco.yaml
-# val_fitness_weights: [0.5, 0.5]  # 可选；默认对各 val 集平分
+# val_fitness_weights: [0.5, 0.5]  # 可选；默认对各 val 集平分；dynamic 时仅 epoch 1
+# val_fitness_dynamic: true
+# val_fitness_lvis_target_mult: 2.0
 ```
 
 各子集可自带 `class_texts`；也可在顶层写一份默认 `class_texts` 下发给未配置的子集。
@@ -764,7 +797,7 @@ val:
 3. Mosaic/MixUp：共享任一同义词的文本组会合并后再改 label
 4. **`use_neg_queue=True`（可选）**：跨子集共享 NegQueue，把最近出现的类名动态补为负类文本
 5. 单集时：`class_texts` **允许长于 `nc`**（多出的行作 OV 负类词表，不再截断）
-6. **多 val**：`val.yolo_data` 可写多项；每 epoch / `final_eval` 按各自 `nc`/`names`/`class_texts` 分别验证并**重建 dataloader**。**`best.pt` fitness = 各子集 fitness 加权平均（默认平分）**；可选 `val_fitness_weights`。各子集指标写入 `results.csv` 时带 `<数据集目录名>/` 前缀。LVIS 自动优先用 `minival`。
+6. **多 val**：`val.yolo_data` 可写多项；每 epoch / `final_eval` 按各自 `nc`/`names`/`class_texts` 分别验证并**重建 dataloader**。**无前缀 `fitness` = 各子集加权平均（决定 `best.pt`）**；无前缀 `metrics/*` = **第一个** val 集拷贝。可选 `val_fitness_weights` / `val_fitness_dynamic`（见 §6）。LVIS 自动优先用 `minival`。
 7. **伪标签**：在各子集（或混数顶层）YAML 写 `pseudo_label*`；仅开启的 train 子集会写 cache / 旁路 `*_train.json`；val 仍读原始 `labels/`（见 §5.5）
 
 ```python

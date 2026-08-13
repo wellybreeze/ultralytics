@@ -415,3 +415,26 @@ def test_setup_model_respects_pretrained_arg_for_pt_models(monkeypatch, pretrain
 
     assert captured["cfg"] == checkpoint_model.yaml, "Checkpoint config was not used"
     assert captured["weights"] is (checkpoint_model if uses_weights else None), "Unexpected weights loaded"
+
+
+def test_plot_milestones_stable_across_nb():
+    """Plot triggers use (epoch, batch) so OOM nb changes do not fire close_mosaic plots early."""
+    trainer = object.__new__(BaseTrainer)
+    trainer.start_epoch = 0
+    trainer.epochs = 10
+    trainer.args = SimpleNamespace(close_mosaic=3)
+
+    trainer._init_plot_milestones()
+    assert trainer._should_plot_training_batch(0, 0)
+    assert trainer._should_plot_training_batch(0, 2)
+    assert not trainer._should_plot_training_batch(1, 28274)
+    assert trainer._should_plot_training_batch(7, 0)
+    assert trainer._should_plot_training_batch(7, 2)
+    assert not trainer._should_plot_training_batch(8, 0)
+
+    # Resume after close_mosaic epoch: skip close_mosaic snapshots
+    trainer.start_epoch = 8
+    trainer._init_plot_milestones()
+    assert not trainer._should_plot_training_batch(0, 0)
+    assert not trainer._should_plot_training_batch(7, 0)
+    assert not trainer._should_plot_training_batch(8, 0)

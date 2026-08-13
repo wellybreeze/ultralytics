@@ -21,7 +21,7 @@ keywords: D-FINE, DFINE, DETR, FDR, GO-LSD, Ultralytics, 目标检测, Transform
 - **细粒度分布精炼（FDR）：** 框边界以离散分布（`reg_max`）精炼，而非单一 L1/GIoU 偏移，有利于模糊边缘与密集场景定位。
 - **GO-LSD：** 解码层间自蒸馏提升定位精度，且不增加推理开销。
 - **无 NMS 的 DETR 头：** 端到端集合预测；Ultralytics 后处理使用置信度过滤（与 RT-DETR 相同）。
-- **原生 Ultralytics 管线：** `DFINE` 门面、`DFINEDetectionModel`、YOLO `data=*.yaml` 训练，以及便于 ONNX/TensorRT 的导出。
+- **原生 Ultralytics 管线：** `DFINE` 门面、`DFINEDetectionModel`、YOLO `data=*.yaml` 训练，以及便于 ONNX/TensorRT 的导出。Objects365 权重也可作为 [WeDetect](wedetect.md) 伪标签教师。
 - **多尺度覆盖：** Nano → XLarge（`dfine-n/s/m/l/x`），并提供 COCO、Objects365、Objects365→COCO 预训练权重。
 
 ## 模型库
@@ -114,7 +114,8 @@ yolo export model=dfine-l.pt format=onnx
 ```
 
 > **预处理**  
-> 与官方 D-FINE 推理一致：将图像方形缩放到 `imgsz`（默认 640），使用 `LetterBox(scale_fill=True)`，再除以 255。Ultralytics 路径下**不要**做 ImageNet mean/std 归一化。
+> **预测 / 伪标签教师** 对齐官方 D-FINE：`LetterBox(scale_fill=True)` 拉伸到方形 `imgsz`，再 `/255`，**不要**做 ImageNet mean/std。  
+> **验证** 用带 padding 的 `LetterBox(scale_fill=False, scaleup=False)`。**训练** 用 mosaic / `RandomPerspective` 仿射到方形，不是官方 scale-fill。与官方 zoo 对比 val mAP 时注意此差异。
 
 ## 支持的任务与模式
 
@@ -128,13 +129,101 @@ yolo export model=dfine-l.pt format=onnx
 
 架构 YAML 位于 `ultralytics/cfg/models/dfine/`。
 
+## 全流程
+
+```text
+YOLO 数据 YAML  →  DFINE.train()  →  best.pt
+        ↓
+DFINE.val() / DFINE.predict() / DFINE.export()
+        ↓
+可选：作为 WeDetect 伪标签教师（Objects365 权重）
+```
+
+`YOLO("dfine-*.pt")` 在检测头为 `DFINEDecoder` 时会变成 `DFINE`。推荐 `from ultralytics import DFINE`。需要 `torch>=1.11`。
+
+### 训练
+
+`DFINETrainer` 复用 RT-DETR 循环（`rect=False`，DETR 风格 batch 供 CDN）。日志里的 loss 名为 `giou_loss` / `cls_loss` / `l1_loss`（FGL/DDF 计入总 loss 但不显示）；实际准则为 `DFINEDetectionLoss`：
+
+| 项 | 默认权重 | 作用 |
+| -- | -------- | ---- |
+| VFL | `loss_vfl=1.0` | 分类 |
+| L1 box | `loss_bbox=5.0` | 框回归 |
+| GIoU | `loss_giou=2.0` | 重叠 |
+| FGL | `loss_fgl=0.15` | FDR 细粒度定位 |
+| DDF | `loss_ddf=1.5` | GO-LSD 蒸馏 |
+
+```python
+from ultralytics import DFINE
+
+model = DFINE("pretrained_weights/dfine-x-obj365.pt")  # 自定义/密集场景建议 Obj365
+model.train(data="coco8.yaml", epochs=50, imgsz=640, batch=4, device=0)
+```
+
+YAML：
+
+- **N/S/M：** `use_lab=True`（Learnable Affine Block）
+- **L/X：** `freeze_norm: true` → 骨干 FrozenBatchNorm2d
+- 解码器默认 `nq=300`、`reg_max=32`。改 `nc` 会重初始化分类头；Objects365 权重为 `nc=366`
+
+`fuse()` 对齐官方 `DFINE.deploy()`，不是整网 YOLO Conv+BN fuse。AMP 可能导致 NaN / 匹配失败（与 RT-DETR 相同）；`F.grid_sample` 不支持 `deterministic=True`。
+
+### 验证与预测
+
+预处理 **按模式不同**：
+
+| 模式 | 缩放 |
+| ---- | ---- |
+| 预测 / WeDetect 教师 | `LetterBox(..., scale_fill=True)` — 拉伸成方（官方推理） |
+| 验证 | `LetterBox(..., scale_fill=False, scaleup=False)` — 保比例、padding |
+| 训练 | Mosaic + `RandomPerspective` 到方形 `imgsz` |
+
+均 `/255`、无 ImageNet mean/std。后处理只做置信度过滤（无 NMS）。`max_det` 只限制返回条数，query 数仍是 `nq`（默认 300）。导出时 `max_det` 会钳到 `num_queries`，并 **强制 `nms=False`**。
+
+**非 640 `imgsz`：** `DFINEDecoder` 在特征图 `spatial_shapes` 变化时重建 log-anchor（`self.shapes` 缓存；N 版 YAML 可能预置 `eval_spatial_size=[640,640]`，首次 forward 会覆盖）。不要假设 anchors 永远按 640 固化。
+
+### 类别名
+
+| 权重 | 头 `nc` | `names` |
+| ---- | ------- | ------- |
+| COCO `dfine-*.pt` | 80 | COCO 80，id `0..79` |
+| Objects365 `dfine-*-obj365.pt` | 366 | 下标 `0` = `background`；数据集类 `i` → 头 `i+1` |
+
+加载后 `ensure_dfine_class_names` 会替换占位 `{i: str(i)}`。作为 **WeDetect 教师** 时，按英文 `pseudo_label_classes` 对齐到上述 head 名，而不是 YOLO 本地 id。
+
+### 导出
+
+与 RT-DETR 同一导出路径（`DFINEDecoder` 在 `_DETR_DECODERS`）。ONNX 需要 **opset ≥ 16**。TensorFlow 导出需要 opset 16–19。DETR 头 **强制 `nms=False`**。该系列 CoreML 不支持 `dynamic=True`。
+
+```python
+from ultralytics import DFINE
+
+DFINE("dfine-l.pt").export(format="onnx", imgsz=640, opset=17)
+```
+
+### 作为 WeDetect 伪标签教师
+
+写在 WeDetect **train 子集** YAML（见 [WeDetect](wedetect.md)）：
+
+```yaml
+pseudo_label: true
+pseudo_label_model: ./pretrained_weights/dfine-x-obj365.pt
+pseudo_label_classes: Objects365.yaml
+pseudo_label_class_texts: texts/objects365_zh_class_texts.json
+pseudo_label_conf: 0.2
+pseudo_label_imgsz: 640  # 与 WeDetect 训练 imgsz 无关
+```
+
+教师走 `DFINE.predict`（scale-fill、无 NMS）。即使 WeDetect 以 1280 训练，教师默认仍是 640，除非改 `pseudo_label_imgsz`。若教师在 **已写入部分 cache 之后** OOM，不会自动减半 batch——请调低 `pseudo_label_batch` 后重跑。
+
 ## 架构说明
 
 - **骨干：** HGNetv2，以 Ultralytics `HGStem` / `HGBlock` / `DWConv` 拆层实现。
 - **编码器：** 官方 HybridEncoder 对应 `DFINERepNCSPELAN4` / `DFINESCDown`（不要与 YOLO 的 `RepNCSPELAN4` / `SCDown` 混用）。
 - **解码器：** `DFINEDecoder` 实现 FDR（`Integral`、LQE、Gate）与 CDN 训练查询。
 - **损失：** `DFINEDetectionLoss`（VFL + L1/GIoU + FGL/DDF + GO-LSD）。
-- **训练/验证/预测：** 与 RT-DETR 共享 DETR 风格数据管线（`rect=False`、scale-fill letterbox、无 NMS）。
+- **训练/验证/预测：** 与 RT-DETR 共享 DETR 风格数据管线（`rect=False`、无 NMS）。**预测** 用 scale-fill letterbox；**验证** 用 padding letterbox；**训练** 用 mosaic / affine。`imgsz` 变化时重建 anchors。
+- **BN：** 将 `BatchNorm2d` 重置为官方 `eps=1e-5`、`momentum=0.1`（不是 YOLO 的 `1e-3` / `0.03`）。
 
 ## 引用与致谢
 
@@ -176,3 +265,15 @@ yolo export model=dfine-l.pt format=onnx
 ### `max_det` 会增加 D-FINE 的 query 数量吗？
 
 不会。与 RT-DETR 相同，`max_det` 只限制返回检测数。解码器仍输出固定数量的 query（默认 300）。若需要更多 query，请在 YAML 中提高 `nq` 并重新训练。
+
+### 640 训练后能否用 1280 推理？
+
+可以。解码器按当前特征图尺寸重建 anchors。WeDetect 把 D-FINE 当教师并设 `pseudo_label_imgsz=1280` 时走同一路径。
+
+### Objects365 的类别下标怎么对应？
+
+官方 Obj365 权重有 366 维：0 为 background，其后 365 类整体 +1。`DFINE("dfine-x-obj365.pt").names[0]` 是 `"background"`。用 `classes=` 过滤时要用这些 head 下标，不要用 Objects365 yaml 的 0 起始 id。
+
+### 能否把 D-FINE 当作 WeDetect 伪标签教师？
+
+可以。在子集 YAML 设 `pseudo_label_model` 为 D-FINE `.pt`，`pseudo_label_classes` 用 `Objects365.yaml`（COCO 权重则用 COCO names）。见 [WeDetect](wedetect.md) 与 [OV 微调教程](../guides/wedetect-ov-finetune.md)。

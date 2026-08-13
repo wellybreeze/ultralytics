@@ -218,6 +218,10 @@ CFG_FLOAT_KEYS = frozenset(
         "time",
         "workspace",
         "batch",
+        "val_fitness_lvis_target_mult",
+        "val_fitness_dynamic_ema",
+        "val_fitness_weight_clip_min",
+        "val_fitness_weight_clip_max",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -324,6 +328,7 @@ CFG_BOOL_KEYS = frozenset(
         "close_set",
         "mask_refine",
         "pseudo_label",
+        "val_fitness_dynamic",
     }
 )
 CFG_STR_KEYS = frozenset(

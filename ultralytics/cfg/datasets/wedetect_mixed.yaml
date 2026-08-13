@@ -11,7 +11,8 @@
 #   - Optional use_neg_queue=True shares a NegQueue across subsets for dynamic negatives
 #   - Multiple val.yolo_data entries: each is evaluated every epoch with its own nc/names/class_texts
 #     * best.pt fitness = weighted average of all val sets (default: equal weights)
-#     * Optional: val_fitness_weights: [0.5, 0.3, 0.2]  # same order as val.yolo_data; auto-normalized
+#     * Optional: val_fitness_weights: [0.5, 0.3, 0.2]  # epoch 1 when val_fitness_dynamic is true
+#     * Optional: val_fitness_dynamic: true  # epoch 2+ reweight by prior mAP50-95
 #     * Per-set metrics are logged with a "<dataset_name>/" prefix in results.csv
 #
 # Example: domain data (custom classes) + COCO/LVIS (open-vocab retention), Chinese prompts preferred.

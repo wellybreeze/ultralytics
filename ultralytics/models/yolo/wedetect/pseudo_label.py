@@ -16,6 +16,7 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
+from ultralytics.data.dataset import DATASET_CACHE_VERSION
 from ultralytics.data.utils import (
     IMG_FORMATS,
     dataset_root as _dataset_root,
@@ -33,8 +34,6 @@ from ultralytics.utils.checks import check_file
 
 PSEUDO_LABELS_DIR = "labels_pseudo_merged"
 PSEUDO_META_NAME = "pseudo_label_meta.json"
-# Keep in sync with ultralytics.data.dataset.DATASET_CACHE_VERSION
-DATASET_CACHE_VERSION = "1.0.3"
 DEFAULT_CONF = 0.25
 DEFAULT_CLASSES = ROOT / "cfg/datasets/coco.yaml"
 DEFAULT_CLASS_TEXTS = ROOT / "cfg/datasets/texts/coco_zh_class_texts.json"
@@ -1182,6 +1181,22 @@ def merged_cache_path(im_files: list[str]) -> Path:
     return Path(label_files[0]).parent.with_suffix(".cache")
 
 
+def resolve_merged_cache_path(data: dict, im_files: list[str]) -> Path:
+    """Resolve merged pseudo cache path; prefer ``pseudo_label_meta.json`` when present."""
+    root = _dataset_root(data, im_files)
+    if root is not None:
+        meta_path = root / PSEUDO_META_NAME
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                cached = meta.get("merged_cache")
+                if cached and Path(cached).exists():
+                    return Path(cached)
+            except Exception:
+                pass
+    return merged_cache_path(im_files)
+
+
 def merged_cache_hash(im_files: list[str], root: Path | None = None) -> str:
     label_files = img2label_paths(im_files, label_dir=PSEUDO_LABELS_DIR)
     return portable_paths_hash([str(p) for p in label_files] + list(im_files), root)
@@ -1304,52 +1319,182 @@ def try_load_cache(path: Path, expected_hash: str) -> dict | None:
         return None
 
 
-def load_gt_label_entries(im_files: list[str], nc_gt: int) -> list[dict]:
-    """Load GT label dicts from ``labels.cache`` or scan ``labels/*.txt`` + image shapes."""
-    gt_label_files = img2label_paths(im_files, label_dir="labels")
-    gt_cache_path = Path(gt_label_files[0]).parent.with_suffix(".cache")
-    expected = get_hash(gt_label_files + im_files)
-    cached = try_load_cache(gt_cache_path, expected)
-    if cached is not None:
-        LOGGER.info(f"{colorstr('WeDetect pseudo:')} loaded GT from {gt_cache_path}")
-        index = _index_by_image(cached["labels"])
-        out = []
-        for im in im_files:
-            lb = _lookup_label(index, im)
-            if lb is None:
-                try:
-                    shape = _image_shape_hw(im)
-                except Exception:
-                    shape = (0, 0)
-                out.append(_label_entry(im, shape, _empty_cls(), _empty_xywh()))
-                continue
-            cls = np.asarray(lb["cls"], dtype=np.float32).reshape(-1)
-            bboxes = np.asarray(lb["bboxes"], dtype=np.float32).reshape(-1, 4)
-            if len(cls):
-                keep = (cls >= 0) & (cls < nc_gt)
-                cls, bboxes = cls[keep], bboxes[keep]
-            entry = dict(lb)
-            entry["im_file"] = im
-            entry["cls"] = cls.reshape(-1, 1) if len(cls) else _empty_cls()
-            entry["bboxes"] = bboxes if len(bboxes) else _empty_xywh()
-            out.append(entry)
-        return out
+def _labels_list_to_index(labels: list[dict]) -> dict[str, dict]:
+    """Index label dicts by absolute path and basename."""
+    by_path: dict[str, dict] = {}
+    by_name: dict[str, dict] = {}
+    for lb in labels:
+        im = str(lb["im_file"])
+        by_path[im] = lb
+        by_name[Path(im).name] = lb
+    return {"path": by_path, "name": by_name}
 
-    LOGGER.info(f"{colorstr('WeDetect pseudo:')} scanning GT labels from txt ({len(im_files)} images)")
-    labels = []
-    for im, lb_path in zip(im_files, gt_label_files):
-        try:
-            shape = _image_shape_hw(im)
-        except Exception as e:
-            LOGGER.warning(f"{colorstr('WeDetect pseudo:')} corrupt image {im}: {e}; using shape (0, 0)")
-            shape = (0, 0)
-        gt = read_yolo_labels(Path(lb_path))
-        if len(gt):
-            gt = gt[(gt[:, 0] >= 0) & (gt[:, 0] < nc_gt)]
-        cls = gt[:, 0:1] if len(gt) else _empty_cls()
-        boxes = gt[:, 1:5] if len(gt) else _empty_xywh()
-        labels.append(_label_entry(im, shape, cls, boxes))
-    return labels
+
+def _gt_entry_from_label(lb: dict, im: str, nc_gt: int) -> dict:
+    """Filter GT classes and normalize one label entry for merge/rebuild."""
+    cls = np.asarray(lb["cls"], dtype=np.float32).reshape(-1)
+    bboxes = np.asarray(lb["bboxes"], dtype=np.float32).reshape(-1, 4)
+    if len(cls):
+        keep = (cls >= 0) & (cls < nc_gt)
+        cls, bboxes = cls[keep], bboxes[keep]
+    entry = dict(lb)
+    entry["im_file"] = im
+    entry["cls"] = cls.reshape(-1, 1) if len(cls) else _empty_cls()
+    entry["bboxes"] = bboxes if len(bboxes) else _empty_xywh()
+    return entry
+
+
+def _scan_gt_shard(
+    shard_im: list[str],
+    shard_lb: list[str],
+    nc_gt: int,
+    *,
+    root: Path | None,
+    cache_path: Path,
+) -> dict[str, dict]:
+    """Parallel scan of one label shard; saves ``labels.cache`` when done."""
+    from itertools import repeat
+    from multiprocessing.pool import ThreadPool
+
+    from ultralytics.data.utils import verify_image_label
+    from ultralytics.utils import NUM_THREADS, TQDM
+
+    prefix = f"{colorstr('WeDetect pseudo:')} "
+    num_cls = max(int(nc_gt), 1)
+    args = zip(
+        shard_im,
+        shard_lb,
+        repeat(prefix),
+        repeat(False),
+        repeat(num_cls),
+        repeat(0),
+        repeat(0),
+        repeat(False),
+    )
+    labels: list[dict] = []
+    nf = nm = ne = nc = 0
+    msgs: list[str] = []
+    with ThreadPool(NUM_THREADS) as pool:
+        for result in TQDM(
+            pool.imap(verify_image_label, args),
+            total=len(shard_im),
+            desc=f"{prefix}scan GT {cache_path.parent.name}",
+        ):
+            im_file, lb, shape, _segments, _keypoints, nm_f, nf_f, ne_f, nc_f, msg = result
+            nm += nm_f
+            nf += nf_f
+            ne += ne_f
+            nc += nc_f
+            if msg:
+                msgs.append(msg)
+            if not im_file:
+                continue
+            labels.append(
+                {
+                    "im_file": im_file,
+                    "shape": shape,
+                    "cls": lb[:, 0:1],
+                    "bboxes": lb[:, 1:],
+                    "segments": [],
+                    "keypoints": None,
+                    "normalized": True,
+                    "bbox_format": "xywh",
+                }
+            )
+    expected = portable_paths_hash(shard_lb + shard_im, root=root)
+    save_dataset_cache_file(
+        prefix,
+        cache_path,
+        {
+            "labels": labels,
+            "hash": expected,
+            "results": (nf, nm, ne, nc, len(shard_im)),
+            "msgs": msgs,
+        },
+        DATASET_CACHE_VERSION,
+    )
+    LOGGER.info(f"{prefix}saved GT shard cache {cache_path} ({len(shard_im)} images)")
+    return _labels_list_to_index(labels)
+
+
+def load_gt_label_entries(im_files: list[str], nc_gt: int, root: Path | None = None) -> list[dict]:
+    """Load GT label dicts from per-shard ``labels.cache`` or parallel scan of ``labels/*.txt``."""
+    if not im_files:
+        return []
+
+    from collections import defaultdict
+
+    root = root or _dataset_root(None, im_files)
+    gt_label_files = img2label_paths(im_files, label_dir="labels")
+    shards: dict[Path, list[tuple[str, str]]] = defaultdict(list)
+    for im, lb in zip(im_files, gt_label_files):
+        shards[Path(lb).parent].append((im, lb))
+
+    global_index = {"path": {}, "name": {}}
+    missing: list[tuple[str, str, Path]] = []
+
+    for label_parent, pairs in shards.items():
+        shard_im = [p[0] for p in pairs]
+        shard_lb = [p[1] for p in pairs]
+        cache_path = label_parent.with_suffix(".cache")
+        expected = portable_paths_hash(shard_lb + shard_im, root=root)
+        cached = try_load_cache(cache_path, expected)
+        shard_index = None
+        if cached is not None:
+            LOGGER.info(f"{colorstr('WeDetect pseudo:')} loaded GT shard from {cache_path} ({len(shard_im)} images)")
+            shard_index = _labels_list_to_index(cached["labels"])
+        elif cache_path.exists():
+            try:
+                raw = load_dataset_cache_file(cache_path)
+                raw_labels = remap_label_im_files(list(raw.get("labels") or []), shard_im, root)
+                if raw_labels:
+                    shard_index = _labels_list_to_index(raw_labels)
+                    LOGGER.info(
+                        f"{colorstr('WeDetect pseudo:')} reuse GT shard index from {cache_path} "
+                        f"({len(raw_labels)} cached entries; lookup by path)"
+                    )
+            except Exception:
+                shard_index = None
+
+        if shard_index is None:
+            missing.extend((im, lb, cache_path) for im, lb in pairs)
+            continue
+
+        for im, _lb in pairs:
+            lb = _lookup_label(shard_index, im)
+            if lb is None:
+                missing.append((im, _lb, cache_path))
+
+        global_index["path"].update(shard_index["path"])
+        global_index["name"].update(shard_index["name"])
+
+    if missing:
+        by_cache: dict[Path, list[tuple[str, str]]] = defaultdict(list)
+        for im, lb, cache_path in missing:
+            by_cache[cache_path].append((im, lb))
+        LOGGER.info(
+            f"{colorstr('WeDetect pseudo:')} scanning GT labels from txt "
+            f"({len(missing)} images, {len(by_cache)} shard(s))"
+        )
+        for cache_path, pairs in by_cache.items():
+            shard_im = [p[0] for p in pairs]
+            shard_lb = [p[1] for p in pairs]
+            shard_index = _scan_gt_shard(shard_im, shard_lb, nc_gt, root=root, cache_path=cache_path)
+            global_index["path"].update(shard_index["path"])
+            global_index["name"].update(shard_index["name"])
+
+    out = []
+    for im in im_files:
+        lb = _lookup_label(global_index, im)
+        if lb is None:
+            try:
+                shape = _image_shape_hw(im)
+            except Exception:
+                shape = (0, 0)
+            out.append(_label_entry(im, shape, _empty_cls(), _empty_xywh()))
+        else:
+            out.append(_gt_entry_from_label(lb, im, nc_gt))
+    return out
 
 
 def preds_to_pseudo_entries(
@@ -1645,7 +1790,7 @@ def build_merged_pseudo_cache(
     """Merge GT+pseudo and write ``labels_pseudo_merged.cache``; return cache dict."""
     root = root or _dataset_root(data, im_files)
     merged_labels, _ = merge_gt_and_pseudo_entries(gt_entries, pseudo_entries)
-    path = merged_cache_path(im_files)
+    path = resolve_merged_cache_path(data, im_files)
     h = merged_cache_hash(im_files, root=root)
     return save_label_cache(path, merged_labels, h, extra={"path_mode": PORTABLE_HASH_MODE})
 
@@ -1678,10 +1823,15 @@ def rebuild_merged_pseudo_cache(data: dict, im_files: list[str]) -> dict:
         pseudo_cache = load_dataset_cache_file(p_cache)
     except Exception as e:
         raise FileNotFoundError(f"Failed to load pseudo cache {p_cache}: {e}") from e
-    if pseudo_cache.get("version") != DATASET_CACHE_VERSION or not pseudo_cache.get("labels"):
+    if pseudo_cache.get("version") != DATASET_CACHE_VERSION:
+        LOGGER.warning(
+            f"{colorstr('WeDetect pseudo:')} pseudo cache version {pseudo_cache.get('version')} "
+            f"!= {DATASET_CACHE_VERSION}, reusing labels"
+        )
+    if not pseudo_cache.get("labels"):
         raise RuntimeError(f"Invalid pseudo cache at {p_cache}; regenerate with pseudo_label=True")
 
-    gt_entries = load_gt_label_entries(im_files, nc_gt=nc_gt)
+    gt_entries = load_gt_label_entries(im_files, nc_gt=nc_gt, root=root)
     if not gt_entries:
         raise RuntimeError("No GT labels available to merge with pseudo cache")
 
@@ -1769,7 +1919,7 @@ def apply_pseudo_labels_to_subset(
     out_root = root or Path(train_path).parent
     meta_path = out_root / PSEUDO_META_NAME
     p_cache_path = pseudo_only_cache_path(data, im_files, model=model_path)
-    m_cache_path = merged_cache_path(im_files)
+    m_cache_path = resolve_merged_cache_path(data, im_files)
     m_hash = merged_cache_hash(im_files, root=root)
     p_hash = _pseudo_only_hash(
         im_files,
@@ -1834,7 +1984,7 @@ def apply_pseudo_labels_to_subset(
         )
 
     # --- 3) GT entries (shapes + boxes); keep 1:1 with im_files for stable cache hashes ---
-    gt_entries = load_gt_label_entries(im_files, nc_gt=nc_gt)
+    gt_entries = load_gt_label_entries(im_files, nc_gt=nc_gt, root=root)
     if not gt_entries:
         LOGGER.warning(f"{colorstr('WeDetect pseudo:')} no GT entries; skip")
         return data

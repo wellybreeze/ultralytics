@@ -48,6 +48,7 @@ Guides are grouped by project stage — from environment setup and data preparat
 
 - [Tips for Model Training](model-training-tips.md): Explore tips on optimizing [batch sizes](https://www.ultralytics.com/glossary/batch-size), using [mixed precision](https://www.ultralytics.com/glossary/mixed-precision), applying pretrained weights, and more to make training your computer vision model a breeze.
 - [Fine-Tuning YOLO on Custom Data](finetuning-guide.md): Complete guide to fine-tuning YOLO26 on custom datasets with pretrained weights, covering transfer learning, layer freezing, optimizer selection, two-stage training, and troubleshooting.
+- [WeDetect Open-Vocabulary Fine-Tune](wedetect-ov-finetune.md): Train WeDetect (ConvNeXt + XLM-RoBERTa) with Chinese `class_texts`, mixed datasets, optional D-FINE/SAM3 pseudo labels, and dual ONNX/TensorRT export.
 - [YOLO26 Training Recipe](yolo26-training-recipe.md): Full documentation of the hyperparameters, augmentation pipelines, and optimizer settings used to train the official YOLO26 base checkpoints on COCO, with practical fine-tuning guidance.
 - [Hyperparameter Tuning](hyperparameter-tuning.md): Discover how to optimize your YOLO models by fine-tuning hyperparameters using the Tuner class and genetic evolution algorithms.
 - [Knowledge Distillation](knowledge-distillation.md): Learn how to improve model performance by transferring knowledge from a larger teacher model to a smaller student model using feature-based distillation.

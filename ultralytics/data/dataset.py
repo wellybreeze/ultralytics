@@ -282,10 +282,21 @@ class YOLODataset(BaseDataset):
         """
         label_dir = (self.data or {}).get("labels_dir") or "labels"
         is_pseudo_merged = str(label_dir) == "labels_pseudo_merged"
+        if is_pseudo_merged:
+            from ultralytics.models.yolo.wedetect.pseudo_label import resolve_merged_cache_path
+
+            cache_path = resolve_merged_cache_path(self.data or {}, self.im_files)
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
-            assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == cache_hash  # identical hash
+            if cache["version"] != DATASET_CACHE_VERSION:
+                if is_pseudo_merged:
+                    LOGGER.warning(
+                        f"{self.prefix}cache version {cache.get('version')} != {DATASET_CACHE_VERSION}, "
+                        f"hash match OK for {cache_path.name}"
+                    )
+                else:
+                    raise AssertionError(f"cache version {cache.get('version')} != {DATASET_CACHE_VERSION}")
             root = dataset_root(self.data or {}, self.im_files)
             cache["labels"] = remap_label_im_files(list(cache.get("labels") or []), self.im_files, root)
         except (FileNotFoundError, AssertionError, AttributeError, ModuleNotFoundError):

@@ -59,6 +59,11 @@ pseudo_label_mem_fraction: 0.85 # (float) free-VRAM fraction fallback
 pseudo_label_imgsz: 640 # (int) teacher inference size; independent of train imgsz
 pseudo_label_flush_every: 200 # (int) incremental teacher-cache flush interval (images)
 pseudo_label_prefetch: 2 # (int) loader batches to prefetch ahead of GPU inference; 0=off
+val_fitness_dynamic: False # (bool) mixed val: epoch 2+ reweight best.pt fitness by prior mAP50-95 gaps
+val_fitness_lvis_target_mult: 2.0 # (float) mixed val dynamic: LVIS target = mult × mean customer mAP50-95
+val_fitness_dynamic_ema: 0.5 # (float) EMA for dynamic val weights; 0=off, 1=freeze after first update
+val_fitness_weight_clip_min: 0.5 # (float) min raw dynamic weight before normalization
+val_fitness_weight_clip_max: 20.0 # (float) max raw dynamic weight before normalization
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)

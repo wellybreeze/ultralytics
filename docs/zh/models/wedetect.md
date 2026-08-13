@@ -31,11 +31,11 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 ### Zero-shot
 
-| 模型 | 骨干 | 语言塔 | 分辨率 | AP<sup>minival</sup> | COCO AP | 参数量 | FPS | 配置 |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| [WeDetect-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny.pt) | ConvNeXt-T | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **37.4** | 44.9 | 33M | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml) |
-| [WeDetect-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base.pt) | ConvNeXt-B | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **47.3** | 52.1 | 176M | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml) |
-| [WeDetect-Large](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 | **55.0** | 54.5 | 490M | 6.0 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
+|                                                  模型                                                   |    骨干    |                               语言塔                               |  分辨率   | AP<sup>minival</sup> | COCO AP | 参数量 | FPS  |                                 配置                                 |
+| :-----------------------------------------------------------------------------------------------------: | :--------: | :----------------------------------------------------------------: | :-------: | :------------------: | :-----: | :----: | :--: | :------------------------------------------------------------------: |
+|  [WeDetect-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny.pt)  | ConvNeXt-T |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **37.4**       |  44.9   |  33M   | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml)  |
+|  [WeDetect-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base.pt)  | ConvNeXt-B |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **47.3**       |  52.1   |  176M  | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml)  |
+| [WeDetect-Large](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 |       **55.0**       |  54.5   |  490M  | 6.0  | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
 
 <details>
 <summary><strong>分项指标（LVIS / COCO / ODInW）</strong></summary>
@@ -52,10 +52,10 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 推理不走在线 LM，使用可学习 prompt embedding（更快，不能按 `set_classes` 任意换开放词汇提示）。
 
-| 模型 | 语言塔（仅训练初始化） | 配置 |
-| :---: | :---: | :---: |
-| [WeDetect-Uni-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-tiny.yaml) |
-| [WeDetect-Uni-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml) |
+|                                                      模型                                                       |                      语言塔（仅训练初始化）                      |                                   配置                                   |
+| :-------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------: | :----------------------------------------------------------------------: |
+|  [WeDetect-Uni-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny_uni.pt)  | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-tiny.yaml)  |
+|  [WeDetect-Uni-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base_uni.pt)  | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml)  |
 | [WeDetect-Uni-Large](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_large_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-large.yaml) |
 
 **注意：**

@@ -62,10 +62,10 @@ pip install transformers sentencepiece onnx onnxruntime
 
 文本编码器须与检测权重成对（YAML `text_model`）：
 
-| WeDetect | YAML `text_model` | 语言塔（Hugging Face） | 本地目录 |
-| -------- | ----------------- | ---------------------- | -------- |
-| Tiny / Base / Uni | `xlm-roberta:base` | [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | `xlm-roberta-base/` |
-| Large / XLarge | `xlm-roberta:large` | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | `xlm-roberta-large/` |
+| WeDetect          | YAML `text_model`   | 语言塔（Hugging Face）                                                              | 本地目录             |
+| ----------------- | ------------------- | ----------------------------------------------------------------------------------- | -------------------- |
+| Tiny / Base / Uni | `xlm-roberta:base`  | [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)   | `xlm-roberta-base/`  |
+| Large / XLarge    | `xlm-roberta:large` | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | `xlm-roberta-large/` |
 
 检测权重里的 `text_model_weights` 会载入 WeDetect 训练过的 LM；分词器/结构解析顺序（见 `ultralytics/nn/text_model.py`）：
 

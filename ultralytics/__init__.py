@@ -43,19 +43,19 @@ __all__ = (  # noqa: PLE0604
 if TYPE_CHECKING:
     # Enable hints for type checkers
     from ultralytics.models import (
+        DEFINE,
         LLM,
-        YOLO,
-        YOLOWorld,
-        YOLOE,
         NAS,
-        SAM,
-        FastSAM,
+        RFDETR,
         RTDETR,
+        SAM,
+        YOLO,
+        YOLOE,
+        FastSAM,
         WeDetect,
         WeDetectUni,
-        RFDETR,
-        DEFINE,
-    )  # noqa
+        YOLOWorld,
+    )
 
 
 def __getattr__(name: str):

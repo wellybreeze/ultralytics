@@ -173,7 +173,6 @@ typing = [
     "types-shapely",
 ]
 wedetect = [
-    "timm>=0.9.0",
     "transformers>=4.30.0",
 ]
 

@@ -2187,7 +2187,6 @@ class WeDetectUniModel(DetectionModel):
             end2end=False,
             ch=tuple(neck_out_channels),
             head_in_channels=[256, 512, 1024],
-            normalize_text=True,
         )
         model = nn.ModuleList([backbone, neck, head])
         save = []

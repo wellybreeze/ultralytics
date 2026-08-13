@@ -785,20 +785,16 @@ class BNContrastiveHead(nn.Module):
 
     Args:
         embed_dims (int): Embed dimensions of text and image features.
-        normalize_text (bool): Whether to L2-normalize text features. Default: True. Set to False for WeDetect-Uni
-            models where learnable prompts are not normalized.
     """
 
-    def __init__(self, embed_dims: int, normalize_text: bool = True):
+    def __init__(self, embed_dims: int):
         """Initialize BNContrastiveHead.
 
         Args:
             embed_dims (int): Embedding dimensions for features.
-            normalize_text (bool): Whether to L2-normalize text features.
         """
         super().__init__()
         self.norm = nn.BatchNorm2d(embed_dims)
-        self.normalize_text = normalize_text
         # NOTE: use -10.0 to keep the init cls loss consistency with other losses
         self.bias = nn.Parameter(torch.tensor([-10.0]))
         # use -1.0 is more stable
@@ -827,8 +823,7 @@ class BNContrastiveHead(nn.Module):
             (torch.Tensor): Similarity scores.
         """
         x = self.norm(x)
-        if self.normalize_text:
-            w = F.normalize(w, dim=-1, p=2)
+        w = F.normalize(w, dim=-1, p=2)
 
         x = torch.einsum("bchw,bkc->bkhw", x, w)
         return x * self.logit_scale.exp() + self.bias
@@ -2083,6 +2078,24 @@ class RealNVP(nn.Module):
         return self.prior.log_prob(z) + log_det
 
 
+class _DropPath(nn.Module):
+    """Stochastic depth (same keep-scaling as timm DropPath). Used by ConvNeXt; no timm import."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+        if keep_prob > 0.0:
+            random_tensor.div_(keep_prob)
+        return x * random_tensor
+
+
 class ConvNeXtBlock(nn.Module):
     """ConvNeXt residual block.
 
@@ -2106,9 +2119,7 @@ class ConvNeXtBlock(nn.Module):
             if layer_scale_init_value > 0
             else None
         )
-        from timm.models.layers import DropPath
-
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = _DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
         identity = x

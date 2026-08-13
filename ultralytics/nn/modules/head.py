@@ -1888,7 +1888,7 @@ class WeDetectDetect(Detect):
         self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
 
     @classmethod
-    def from_config(cls, nc, embed, with_bn, reg_max, end2end, ch, head_in_channels, normalize_text=True):
+    def from_config(cls, nc, embed, with_bn, reg_max, end2end, ch, head_in_channels):
         c2 = max((16, head_in_channels[0] // 4, reg_max * 4))
         c3 = max(head_in_channels[0], nc)
         obj = cls.__new__(cls)
@@ -1897,9 +1897,7 @@ class WeDetectDetect(Detect):
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * reg_max, 1)) for x in ch
         )
         obj.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
-        obj.cv4 = nn.ModuleList(
-            BNContrastiveHead(embed, normalize_text=normalize_text) if with_bn else ContrastiveHead() for _ in ch
-        )
+        obj.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
         return obj
 
     def forward(self, x: list[torch.Tensor], text: torch.Tensor) -> dict[str, torch.Tensor] | tuple:

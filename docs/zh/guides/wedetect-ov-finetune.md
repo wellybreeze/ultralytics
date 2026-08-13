@@ -60,14 +60,21 @@ pip install transformers sentencepiece onnx onnxruntime
 | `pretrained_weights/wedetect_base.pt`  | 常用微调起点（对齐原版 Base） |
 | `pretrained_weights/wedetect_large.pt` | 更大模型                      |
 
-文本编码器结构为 **XLM-RoBERTa base**（`xlm-roberta:base`）。检测权重里的 `text_model_weights` 会载入 LM；分词器/结构解析顺序（见 `ultralytics/nn/text_model.py`）：
+文本编码器须与检测权重成对（YAML `text_model`）：
 
-1. **本地目录**（须含 `config.json`）：仓库根下 `xlm-roberta-base/` 或 `checkpoints/xlm-roberta-base/`
-2. HuggingFace 缓存：`~/.cache/huggingface/hub/models--xlm-roberta-base/...`
-3. 均失败则联网下载，并 **先下载成功再** `save_pretrained` 到仓库根 `xlm-roberta-base/`（勿事先建空目录）
+| WeDetect | YAML `text_model` | 语言塔（Hugging Face） | 本地目录 |
+| -------- | ----------------- | ---------------------- | -------- |
+| Tiny / Base / Uni | `xlm-roberta:base` | [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | `xlm-roberta-base/` |
+| Large / XLarge | `xlm-roberta:large` | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | `xlm-roberta-large/` |
 
-> **注意：** 不要在仓库根留下空的 `xlm-roberta-base/`。HuggingFace 会把该相对名当成本地模型路径，导致 tokenizer 报错（信息常误导为缺 `sentencepiece`）。
-> 原版 `WeDetect/xlm-roberta-base` **不会**被自动发现；离线请复制到上述本地候选路径，并确保含 `config.json` 与分词文件。
+检测权重里的 `text_model_weights` 会载入 WeDetect 训练过的 LM；分词器/结构解析顺序（见 `ultralytics/nn/text_model.py`）：
+
+1. **本地目录**（须含 `config.json`）：仓库根下 `xlm-roberta-base/` 或 `xlm-roberta-large/`，以及 `checkpoints/` 下同名目录
+2. HuggingFace 缓存：`~/.cache/huggingface/hub/models--xlm-roberta-base/...` 或 `models--xlm-roberta-large/...`
+3. 均失败则联网下载，并 **先下载成功再** `save_pretrained` 到仓库根对应目录（勿事先建空目录）
+
+> **注意：** 不要在仓库根留下空的 `xlm-roberta-base/` 或 `xlm-roberta-large/`。HuggingFace 会把该相对名当成本地模型路径，导致 tokenizer 报错（信息常误导为缺 `sentencepiece`）。
+> 原版 `WeDetect/xlm-roberta-base` **不会**被自动发现；离线请复制到上述本地候选路径，并确保含 `config.json` 与分词文件。配对关系摘要见 [models/wedetect.md](../models/wedetect.md#语言塔)。
 
 ---
 

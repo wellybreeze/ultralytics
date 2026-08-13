@@ -2,11 +2,12 @@
 
 from .dfine import DFINE
 from .fastsam import FastSAM
+from .llm import LLM
 from .nas import NAS
 from .rtdetr import RTDETR
 from .yolo import YOLO, YOLOE, WeDetect, WeDetectUni, YOLOWorld
 
-__all__ = "DFINE", "NAS", "RFDETR", "RTDETR", "SAM", "YOLO", "YOLOE", "FastSAM", "WeDetect", "WeDetectUni", "YOLOWorld"  # allow simpler import
+__all__ = "LLM", "NAS", "RTDETR", "SAM", "YOLO", "YOLOE", "FastSAM", "YOLOWorld", "WeDetect", "WeDetectUni", "DFINE", "RFDETR" # allow simpler import
 
 
 def __getattr__(name):

@@ -12,9 +12,9 @@ import math
 from collections import OrderedDict
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
+from torch import nn
+from torch.nn import init
 
 from .dfine_encoder import get_activation
 from .dfine_utils import distance2bbox, weighting_function
@@ -76,9 +76,7 @@ def deformable_attention_core_func_v2(
                 .repeat(1, sampling_coord.shape[1])
             )
             sampling_value_l = value_l[s_idx, :, sampling_coord[..., 1], sampling_coord[..., 0]]
-            sampling_value_l = sampling_value_l.permute(0, 2, 1).reshape(
-                bs * n_head, c, Len_q, num_points_list[level]
-            )
+            sampling_value_l = sampling_value_l.permute(0, 2, 1).reshape(bs * n_head, c, Len_q, num_points_list[level])
 
         sampling_value_list.append(sampling_value_l)
 
@@ -96,7 +94,7 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim, *h], [*h, output_dim]))
         self.act = get_activation(act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,12 +176,8 @@ class MSDeformableAttention(nn.Module):
             value_spatial_shapes: [(H_i, W_i), ...]
         """
         bs, Len_q = query.shape[:2]
-        sampling_offsets = self.sampling_offsets(query).reshape(
-            bs, Len_q, self.num_heads, sum(self.num_points_list), 2
-        )
-        attention_weights = self.attention_weights(query).reshape(
-            bs, Len_q, self.num_heads, sum(self.num_points_list)
-        )
+        sampling_offsets = self.sampling_offsets(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list), 2)
+        attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
         attention_weights = F.softmax(attention_weights, dim=-1)
 
         if reference_points.shape[-1] == 2:
@@ -194,9 +188,7 @@ class MSDeformableAttention(nn.Module):
             )
         elif reference_points.shape[-1] == 4:
             num_points_scale = self.num_points_scale.to(dtype=query.dtype).unsqueeze(-1)
-            offset = (
-                sampling_offsets * num_points_scale * reference_points[:, :, None, :, 2:] * self.offset_scale
-            )
+            offset = sampling_offsets * num_points_scale * reference_points[:, :, None, :, 2:] * self.offset_scale
             sampling_locations = reference_points[:, :, None, :, :2] + offset
         else:
             raise ValueError(
@@ -240,7 +232,7 @@ class Integral(nn.Module):
         shape = x.shape
         x = F.softmax(x.reshape(-1, self.reg_max + 1), dim=1)
         x = F.linear(x, project.to(x.device)).reshape(-1, 4)
-        return x.reshape(list(shape[:-1]) + [-1])
+        return x.reshape([*list(shape[:-1]), -1])
 
 
 class LQE(nn.Module):
@@ -329,9 +321,7 @@ class TransformerDecoderLayer(nn.Module):
         target2, _ = self.self_attn(q, k, value=target, attn_mask=attn_mask)
         target = self.norm1(target + self.dropout1(target2))
 
-        target2 = self.cross_attn(
-            self.with_pos_embed(target, query_pos_embed), reference_points, value, spatial_shapes
-        )
+        target2 = self.cross_attn(self.with_pos_embed(target, query_pos_embed), reference_points, value, spatial_shapes)
         target = self.gateway(target, self.dropout2(target2))
 
         target2 = self.forward_ffn(target)
@@ -461,9 +451,8 @@ class TransformerDecoder(nn.Module):
 class DFINEDecoder(nn.Module):
     """Ultralytics-compatible D-FINE transformer decoder head.
 
-    Ports official ``DFINETransformer`` with Ultralytics constructor / forward conventions
-    (similar to ``RTDETRDecoder``): YAML-injected ``ch``, training ``batch`` dict, and
-    inference post-processing to ``(bs, nq, 6)``.
+    Ports official ``DFINETransformer`` with Ultralytics constructor / forward conventions (similar to
+    ``RTDETRDecoder``): YAML-injected ``ch``, training ``batch`` dict, and inference post-processing to ``(bs, nq, 6)``.
     """
 
     export = False
@@ -659,9 +648,7 @@ class DFINEDecoder(nn.Module):
         """Prepare score / bbox heads for deployment (keep only eval layer; idempotent)."""
         if getattr(self, "_deployed", False):
             return
-        self.dec_score_head = nn.ModuleList(
-            [nn.Identity()] * self.eval_idx + [self.dec_score_head[self.eval_idx]]
-        )
+        self.dec_score_head = nn.ModuleList([nn.Identity()] * self.eval_idx + [self.dec_score_head[self.eval_idx]])
         self.dec_bbox_head = nn.ModuleList(
             [self.dec_bbox_head[i] if i <= self.eval_idx else nn.Identity() for i in range(len(self.dec_bbox_head))]
         )
@@ -858,8 +845,8 @@ class DFINEDecoder(nn.Module):
             batch: Ultralytics batch dict for CDN training (``cls``, ``bboxes``, ``batch_idx``, ``gt_groups``).
 
         Returns:
-            Training: dict with ``pred_logits``, ``pred_boxes``, ``pred_corners``, ``ref_points``,
-            ``up``, ``reg_scale``, plus aux / dn fields when enabled.
+            Training: dict with ``pred_logits``, ``pred_boxes``, ``pred_corners``, ``ref_points``, ``up``,
+                ``reg_scale``, plus aux / dn fields when enabled.
             Inference: ``(bs, nq, 6)`` tensor if ``export`` else ``(y, raw_dict)``.
         """
         from ultralytics.models.utils.ops import get_cdn_group

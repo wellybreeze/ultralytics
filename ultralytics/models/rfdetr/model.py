@@ -34,16 +34,18 @@ from .train import DEFAULT_CFG_RFDETR, RFDETRTrainer
 from .val import RFDETRValidator
 
 # Lazy-safe copy of official RF-DETR hyps for ``model.args`` (same file RFDETRTrainer uses as cfg).
-DEFAULT_CFG_RFDETR_DICT = YAML.load(DEFAULT_CFG_RFDETR if Path(DEFAULT_CFG_RFDETR).is_file() else ROOT / "cfg/default.yaml")
+DEFAULT_CFG_RFDETR_DICT = YAML.load(
+    DEFAULT_CFG_RFDETR if Path(DEFAULT_CFG_RFDETR).is_file() else ROOT / "cfg/default.yaml"
+)
 
 
 class RFDETR(Model):
     """Interface for Roboflow RF-DETR detection, segmentation, and keypoint models.
 
-        Args:
+    Args:
         model (str): Native RF-DETR weights or an RF-DETR YAML model configuration.
-        task (str, optional): Explicit task. If None, inferred like YOLO via ``guess_model_task``
-            (architecture head, else filename cues such as ``-seg`` / ``-pose``).
+        task (str, optional): Explicit task. If None, inferred like YOLO via ``guess_model_task`` (architecture head,
+            else filename cues such as ``-seg`` / ``-pose``).
         accept_platform_model_license (bool): Acknowledge the Platform Model License required by RF-DETR Plus models.
 
     Examples:
@@ -127,7 +129,9 @@ class RFDETR(Model):
         self.task = task or guess_model_task(weights)
         config_class = get_config_class(str(weights))
         default_name = Path(str(config_class.model_fields["pretrain_weights"].default)).name
-        native_weights = str(requested.resolve()) if requested.is_file() else str(Path(get_model_cache_dir()) / default_name)
+        native_weights = (
+            str(requested.resolve()) if requested.is_file() else str(Path(get_model_cache_dir()) / default_name)
+        )
         if not Path(native_weights).is_file():
             download_pretrain_weights(default_name)
             native_weights = str(Path(get_model_cache_dir()) / default_name)

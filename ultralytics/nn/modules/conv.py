@@ -56,8 +56,8 @@ class LearnableAffineBlock(nn.Module):
 class FrozenBatchNorm2d(nn.Module):
     """BatchNorm2d with fixed stats/affine (official D-FINE ``freeze_norm`` path).
 
-    Uses the DETR-style fused ``rsqrt`` formulation which differs numerically from
-    ``nn.BatchNorm2d`` eval even with identical buffers — required for L/X parity.
+    Uses the DETR-style fused ``rsqrt`` formulation which differs numerically from ``nn.BatchNorm2d`` eval even with
+    identical buffers — required for L/X parity.
     """
 
     def __init__(self, num_features: int, eps: float = 1e-5):

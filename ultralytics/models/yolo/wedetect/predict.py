@@ -8,10 +8,9 @@ from ultralytics.models.yolo.detect import DetectionPredictor
 class WeDetectPredictor(DetectionPredictor):
     """Predictor for WeDetect open-vocabulary detection models.
 
-    PyTorch weights encode prompts via ``WeDetectModel.set_classes``. Dual ONNX /
-    TensorRT exports (``*_vision`` + ``*_language``) are loaded through
-    ``WeDetectDualBackend``; cached prompts from ``WeDetect.set_classes`` are
-    applied after ``setup_model``.
+    PyTorch weights encode prompts via ``WeDetectModel.set_classes``. Dual ONNX / TensorRT exports (``*_vision`` +
+    ``*_language``) are loaded through ``WeDetectDualBackend``; cached prompts from ``WeDetect.set_classes`` are applied
+    after ``setup_model``.
     """
 
     def setup_model(self, model, verbose: bool = True):
@@ -19,7 +18,7 @@ class WeDetectPredictor(DetectionPredictor):
         super().setup_model(model, verbose=verbose)
         prompts = None
         # Prefer prompts stored on the Ultralytics Model wrapper (WeDetect._prompt_classes)
-        outer = getattr(self, "model", None)
+        getattr(self, "model", None)
         # After setup, self.model is AutoBackend; look for prompts via args overrides / predictor attrs
         if getattr(self, "_prompt_classes", None):
             prompts = self._prompt_classes
@@ -37,9 +36,8 @@ class WeDetectPredictor(DetectionPredictor):
 class WeDetectUniPredictor(DetectionPredictor):
     """Predictor for WeDetect-Uni models that unifies all prompt detections as "object" (cls=0).
 
-    WeDetect-Uni uses learnable prompt embeddings for contrastive learning,
-    but all detections should be reported as a single "object" class with id=0.
-    This predictor post-processes NMS results to unify class ids.
+    WeDetect-Uni uses learnable prompt embeddings for contrastive learning, but all detections should be reported as a
+    single "object" class with id=0. This predictor post-processes NMS results to unify class ids.
     """
 
     def construct_result(self, pred, img, orig_img, img_path):

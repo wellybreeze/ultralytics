@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from abc import abstractmethod
 from pathlib import Path
-
-import os
 
 import torch
 from PIL import Image
@@ -343,9 +342,8 @@ class MobileCLIPTS(TextModel):
 class XLMRoberta(TextModel):
     """XLM-RoBERTa text encoder for multilingual open-vocabulary detection.
 
-    Encodes text descriptions into L2-normalized feature vectors using
-    Facebook's XLM-RoBERTa model, followed by a linear projection head.
-    Supports base (768→768) and large (1024→768) model sizes.
+    Encodes text descriptions into L2-normalized feature vectors using Facebook's XLM-RoBERTa model, followed by a
+    linear projection head. Supports base (768→768) and large (1024→768) model sizes.
 
     Attributes:
         model (XLMRobertaModel): The XLM-RoBERTa encoder.
@@ -374,8 +372,8 @@ class XLMRoberta(TextModel):
         Args:
             size (str): Model size identifier, one of 'base', 'large'.
             device (torch.device): Device to load the model on.
-            state_dict (dict | None): Optional state dict to load into the model (including
-                XLM-RoBERTa backbone and head projection weights).
+            state_dict (dict | None): Optional state dict to load into the model (including XLM-RoBERTa backbone and
+                head projection weights).
         """
         try:
             from transformers import AutoTokenizer, XLMRobertaModel
@@ -398,10 +396,9 @@ class XLMRoberta(TextModel):
             if os.path.isdir(p) and os.path.exists(os.path.join(p, "config.json")):
                 local_path = p
                 break
-        has_local_weights = (
-            local_path
-            and (os.path.exists(os.path.join(local_path, "pytorch_model.bin"))
-                 or os.path.exists(os.path.join(local_path, "model.safetensors")))
+        has_local_weights = local_path and (
+            os.path.exists(os.path.join(local_path, "pytorch_model.bin"))
+            or os.path.exists(os.path.join(local_path, "model.safetensors"))
         )
         try:
             if local_path:
@@ -410,6 +407,7 @@ class XLMRoberta(TextModel):
                     self.model = XLMRobertaModel.from_pretrained(local_path, local_files_only=True)
                 else:
                     from transformers import XLMRobertaConfig
+
                     xcfg = XLMRobertaConfig.from_pretrained(local_path)
                     self.model = XLMRobertaModel(xcfg)
             else:
@@ -426,10 +424,10 @@ class XLMRoberta(TextModel):
         self.head = nn.Linear(cfg["hidden"], cfg["embed"], bias=True)
         if state_dict is not None:
             self.model.load_state_dict(
-                {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")},
+                {k[len("model.") :]: v for k, v in state_dict.items() if k.startswith("model.")},
                 strict=False,
             )
-            head_sd = {k[len("head."):]: v for k, v in state_dict.items() if k.startswith("head.")}
+            head_sd = {k[len("head.") :]: v for k, v in state_dict.items() if k.startswith("head.")}
             if head_sd:
                 self.head.load_state_dict(head_sd)
         self.to(device)
@@ -447,8 +445,8 @@ class XLMRoberta(TextModel):
         """Convert input texts to XLM-RoBERTa token dicts.
 
         Args:
-            texts (list[list[str]] | list[str]): Nested list of class texts
-                (e.g. ``[["person", "car"]]``) or flat list of strings.
+            texts (list[list[str]] | list[str]): Nested list of class texts (e.g. ``[["person", "car"]]``) or flat list
+                of strings.
             truncate (bool): Whether to truncate long sequences.
 
         Returns:

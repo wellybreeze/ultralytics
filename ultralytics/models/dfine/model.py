@@ -46,15 +46,15 @@ def ensure_dfine_class_names(model) -> None:
     model.nc = nc
 
 
-class DFINE(Model):
+class DEFINE(Model):
     """Ultralytics interface for the D-FINE object detection model.
 
     Attributes:
         model (str): Path to the model weights or YAML config.
 
     Examples:
-        >>> from ultralytics import DFINE
-        >>> model = DFINE("dfine-l.yaml")
+        >>> from ultralytics import DEFINE
+        >>> model = DEFINE("dfine-l.yaml")
         >>> results = model("image.jpg")
     """
 
@@ -64,7 +64,7 @@ class DFINE(Model):
         Args:
             model (str): Path to ``.pt`` / ``.yaml`` model.
         """
-        assert TORCH_1_11, "DFINE requires torch>=1.11"
+        assert TORCH_1_11, "DEFINE requires torch>=1.11"
         super().__init__(model=model, task="detect")
         if self.model is not None:
             ensure_dfine_class_names(self.model)

@@ -48,9 +48,7 @@ def resolve_wedetect_dual_pair(weight: str | Path) -> tuple[Path, Path]:
         )
     language = vision.with_name(vision.name.replace("_vision", "_language", 1))
     if not language.is_file():
-        raise FileNotFoundError(
-            f"WeDetect dual language tower not found next to vision weights: expected '{language}'"
-        )
+        raise FileNotFoundError(f"WeDetect dual language tower not found next to vision weights: expected '{language}'")
     return vision, language
 
 
@@ -108,8 +106,8 @@ def _read_engine_metadata(path: Path) -> dict | None:
 def _normalize_wedetect_metadata(meta: dict | None) -> dict:
     """Normalize WeDetect export metadata for BaseBackend.apply_metadata.
 
-    Dual export stores ``stride`` as ``'8,16,32'`` and ``imgsz`` as ``'640,640'``.
-    ``apply_metadata`` expects stride/batch as ints and imgsz as a literal-eval string.
+    Dual export stores ``stride`` as ``'8,16,32'`` and ``imgsz`` as ``'640,640'``. ``apply_metadata`` expects
+    stride/batch as ints and imgsz as a literal-eval string.
     """
     if not meta:
         return {}
@@ -310,7 +308,9 @@ class WeDetectDualBackend(BaseBackend):
         self.vision_path, self.language_path = resolve_wedetect_dual_pair(weight)
         suf = self.vision_path.suffix.lower()
         self.format = {".engine": "engine", ".torchscript": "torchscript"}.get(suf, "onnx")
-        LOGGER.info(f"Loading WeDetect dual {self.format}: vision={self.vision_path.name}, language={self.language_path.name}")
+        LOGGER.info(
+            f"Loading WeDetect dual {self.format}: vision={self.vision_path.name}, language={self.language_path.name}"
+        )
 
         self.lang_session = None
         self.vis_session = None
@@ -464,11 +464,7 @@ class WeDetectDualBackend(BaseBackend):
 
         # EfficientNMS / TorchScript packed NMS / fixed-profile engines lock txt_feats to max_classes.
         # ORT-native onnx_indices keeps a dynamic class axis — padding is unnecessary.
-        if (
-            self.end2end
-            and self.nms_format not in {"onnx_indices"}
-            and self.txt_feats.shape[1] < self.max_classes
-        ):
+        if self.end2end and self.nms_format not in {"onnx_indices"} and self.txt_feats.shape[1] < self.max_classes:
             pad = torch.zeros(
                 self.txt_feats.shape[0],
                 self.max_classes - self.txt_feats.shape[1],
@@ -522,8 +518,8 @@ class WeDetectDualBackend(BaseBackend):
                 im = im.float()
                 txt = txt.float()
             out = self.vis_tower.run({"image": im.to(self.device), "txt_feats": txt.to(self.device)})
-            bboxes = out.get("bboxes", out[sorted(out)[0]]).float()
-            scores = out.get("scores", out[sorted(out)[-1]]).float()
+            bboxes = out.get("bboxes", out[min(out)]).float()
+            scores = out.get("scores", out[max(out)]).float()
 
         # Drop padded class columns if present
         if self.nc_active and scores.shape[-1] > self.nc_active:

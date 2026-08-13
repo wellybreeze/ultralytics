@@ -17,14 +17,14 @@ Load a checkpoint whose stem contains `wedetect` with either `WeDetect(...)` or 
 
 ## Architecture
 
-| Piece | Implementation |
-| ----- | -------------- |
-| Vision backbone | ConvNeXt (`tiny` / `base` / `large` / `xlarge`) |
-| Neck | CSPRepBiFPAN |
-| Head | `WeDetectDetect` (contrastive region–text scoring, embed dim 768) |
-| Text tower | XLM-RoBERTa base (`xlm-roberta:base`) |
-| Model class | `WeDetectModel` in `ultralytics/nn/tasks.py` (built in code, not `parse_model` layer lists) |
-| Trainer / val / predict | `WeDetectTrainer`, `WeDetectValidator`, `WeDetectPredictor` |
+| Piece                   | Implementation                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| Vision backbone         | ConvNeXt (`tiny` / `base` / `large` / `xlarge`)                                             |
+| Neck                    | CSPRepBiFPAN                                                                                |
+| Head                    | `WeDetectDetect` (contrastive region–text scoring, embed dim 768)                           |
+| Text tower              | XLM-RoBERTa base (`xlm-roberta:base`)                                                       |
+| Model class             | `WeDetectModel` in `ultralytics/nn/tasks.py` (built in code, not `parse_model` layer lists) |
+| Trainer / val / predict | `WeDetectTrainer`, `WeDetectValidator`, `WeDetectPredictor`                                 |
 
 YAML configs live under `ultralytics/cfg/models/wedetect/` (`wedetect-tiny.yaml`, `wedetect-base.yaml`, `wedetect-large.yaml`, `wedetect-xlarge.yaml`). Prompt-free **WeDetect-Uni** variants (`wedetect-uni-*.yaml`) replace the live LM with learnable embeddings (`WeDetectUni`).
 
@@ -69,9 +69,9 @@ CLI:
 
 ```bash
 yolo cfg=ultralytics/cfg/wedetect_finetune.yaml \
-    model=pretrained_weights/wedetect_base.pt \
-    data=ultralytics/cfg/datasets/wedetect_coco.yaml \
-    device=0
+  model=pretrained_weights/wedetect_base.pt \
+  data=ultralytics/cfg/datasets/wedetect_coco.yaml \
+  device=0
 ```
 
 `WeDetectTrainer.get_dataset()` loads a single YAML or mixed `train.yolo_data` / `grounding_data`, then runs `maybe_build_pseudo_labels` **before** the train dataloader. Checkpoints store `text_model_weights` so export and later `set_classes` reuse the updated LM.
@@ -85,22 +85,22 @@ First-epoch CUDA OOM on a single GPU halves `batch` (max 3 retries) and rebuilds
 
 `results.csv` columns:
 
-| Column | Meaning |
-| ------ | ------- |
+| Column                            | Meaning                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------- |
 | `metrics/mAP50-95(B)` (no prefix) | Copy of the **first** val set (YAML order), for default Ultralytics plots |
-| `<dataset>/metrics/...` | That subset's own metrics |
-| `fitness` (no prefix) | **Weighted average** of per-set mAP50-95 — this selects `best.pt` |
-| `<dataset>/fitness` | That subset's mAP50-95 |
+| `<dataset>/metrics/...`           | That subset's own metrics                                                 |
+| `fitness` (no prefix)             | **Weighted average** of per-set mAP50-95 — this selects `best.pt`         |
+| `<dataset>/fitness`               | That subset's mAP50-95                                                    |
 
 Optional mixed-val knobs (dataset YAML or `default.yaml`):
 
-| Key | Default | Role |
-| --- | ------- | ---- |
-| `val_fitness_weights` | equal share | Epoch-1 weights (same order as `val.yolo_data`) |
-| `val_fitness_dynamic` | `False` | Epoch 2+ reweight from previous mAP50-95 gaps |
-| `val_fitness_lvis_target_mult` | `2.0` | When a val set is LVIS, its target = `mult ×` mean customer mAP |
-| `val_fitness_dynamic_ema` | `0.5` | EMA on dynamic weights |
-| `val_fitness_weight_clip_min` / `_max` | `0.5` / `20.0` | Clip raw `target/mAP` before normalize |
+| Key                                    | Default        | Role                                                            |
+| -------------------------------------- | -------------- | --------------------------------------------------------------- |
+| `val_fitness_weights`                  | equal share    | Epoch-1 weights (same order as `val.yolo_data`)                 |
+| `val_fitness_dynamic`                  | `False`        | Epoch 2+ reweight from previous mAP50-95 gaps                   |
+| `val_fitness_lvis_target_mult`         | `2.0`          | When a val set is LVIS, its target = `mult ×` mean customer mAP |
+| `val_fitness_dynamic_ema`              | `0.5`          | EMA on dynamic weights                                          |
+| `val_fitness_weight_clip_min` / `_max` | `0.5` / `20.0` | Clip raw `target/mAP` before normalize                          |
 
 Do not treat unprefixed `metrics/mAP50-95(B)` as mixed-training fitness.
 
@@ -120,12 +120,12 @@ results = model.predict(source="ultralytics/assets/bus.jpg", conf=0.25, save=Tru
 
 Use **`export_mode=dual`** (default) so prompts stay swappable after export. Tokenizer stays in Python.
 
-| Format | Typical call | Output |
-| ------ | ------------ | ------ |
-| Dual ONNX | `export(format="onnx", export_mode="dual")` | `*_vision.onnx` + `*_language.onnx` |
-| Dual TensorRT | `export(format="engine", export_mode="dual", device=0)` | sibling `*.engine` |
-| Dual TorchScript | `export(format="torchscript", export_mode="dual", nms=True)` | sibling `*.torchscript` |
-| Whole ONNX | `export(format="onnx", export_mode="whole")` | `*_whole.onnx` (example script only; official `predict` does not load it) |
+| Format           | Typical call                                                 | Output                                                                    |
+| ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Dual ONNX        | `export(format="onnx", export_mode="dual")`                  | `*_vision.onnx` + `*_language.onnx`                                       |
+| Dual TensorRT    | `export(format="engine", export_mode="dual", device=0)`      | sibling `*.engine`                                                        |
+| Dual TorchScript | `export(format="torchscript", export_mode="dual", nms=True)` | sibling `*.torchscript`                                                   |
+| Whole ONNX       | `export(format="onnx", export_mode="whole")`                 | `*_whole.onnx` (example script only; official `predict` does not load it) |
 
 ```python
 from ultralytics import WeDetect
@@ -171,27 +171,27 @@ Enabled per **train** subset (dataset YAML keys override `train()` / CLI). Origi
 
 Resolution order: subset YAML `pseudo_label*` → mixed top-level YAML → finetune/CLI args → defaults.
 
-| Key | Default | Meaning |
-| --- | ------- | ------- |
-| `pseudo_label` | `False` | Enable for this train subset |
-| `pseudo_label_model` | `sam3.pt` | Teacher: SAM3 / YOLO / WeDetect / D-FINE `.pt` |
-| `pseudo_label_classes` | COCO `names` | Teacher English vocab (same order as texts) |
-| `pseudo_label_class_texts` | `coco_zh_class_texts.json` | Chinese rows written into `*_train.json` |
-| `pseudo_label_conf` | `0.25` | Teacher confidence |
-| `pseudo_label_imgsz` | `640` | Teacher inference size; **independent of train `imgsz`** |
-| `pseudo_label_batch` | `0` (auto) | Image batch (YOLO/WeDetect/D-FINE) or SAM3 prompt chunk |
-| `pseudo_label_mem_fraction` | `0.85` | Target fraction of free VRAM when auto-batching |
-| `pseudo_label_flush_every` | `200` | Incremental teacher-cache flush (images) |
-| `pseudo_label_prefetch` | `2` | Loader batches to prefetch; `0` disables |
+| Key                         | Default                    | Meaning                                                  |
+| --------------------------- | -------------------------- | -------------------------------------------------------- |
+| `pseudo_label`              | `False`                    | Enable for this train subset                             |
+| `pseudo_label_model`        | `sam3.pt`                  | Teacher: SAM3 / YOLO / WeDetect / D-FINE `.pt`           |
+| `pseudo_label_classes`      | COCO `names`               | Teacher English vocab (same order as texts)              |
+| `pseudo_label_class_texts`  | `coco_zh_class_texts.json` | Chinese rows written into `*_train.json`                 |
+| `pseudo_label_conf`         | `0.25`                     | Teacher confidence                                       |
+| `pseudo_label_imgsz`        | `640`                      | Teacher inference size; **independent of train `imgsz`** |
+| `pseudo_label_batch`        | `0` (auto)                 | Image batch (YOLO/WeDetect/D-FINE) or SAM3 prompt chunk  |
+| `pseudo_label_mem_fraction` | `0.85`                     | Target fraction of free VRAM when auto-batching          |
+| `pseudo_label_flush_every`  | `200`                      | Incremental teacher-cache flush (images)                 |
+| `pseudo_label_prefetch`     | `2`                        | Loader batches to prefetch; `0` disables                 |
 
 Artifacts (dataset `path` root / first image directory):
 
-| File | Role |
-| ---- | ---- |
-| `pseudo_labels-{model_stem}.cache` | Teacher boxes only (`DATASET_CACHE_VERSION`, currently `1.0.4`) |
-| `labels_pseudo_merged.cache` | GT + pseudo; train `labels_dir=labels_pseudo_merged` |
-| `pseudo_label_meta.json` | Idempotency hash, vocab, cache paths |
-| `<stem>_train.json` | Merged texts (GT prefix + kept teacher rows + leftover negatives) |
+| File                               | Role                                                              |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| `pseudo_labels-{model_stem}.cache` | Teacher boxes only (`DATASET_CACHE_VERSION`, currently `1.0.4`)   |
+| `labels_pseudo_merged.cache`       | GT + pseudo; train `labels_dir=labels_pseudo_merged`              |
+| `pseudo_label_meta.json`           | Idempotency hash, vocab, cache paths                              |
+| `<stem>_train.json`                | Merged texts (GT prefix + kept teacher rows + leftover negatives) |
 
 Cache hit requires matching meta hash, on-disk `*_train.json`, merged cache, **and** a complete teacher cache whose **version + hash** match. A version bump (for example `1.0.3` → `1.0.4`) misses at `apply_pseudo_labels_to_subset` and re-runs the teacher. `YOLODataset.get_labels()` is more tolerant: hash-matched merged caches can load across versions; if merged cache is gone, it rebuilds from teacher cache + GT **without** re-inference.
 
@@ -216,19 +216,19 @@ See [D-FINE](dfine.md) for train/val/predict/export of the teacher itself.
 
 ## Supported tasks and modes
 
-| Model | Config / weights | Task | Train | Val | Predict | Export |
-| ----- | ---------------- | ---- | ----- | --- | ------- | ------ |
-| WeDetect | `wedetect-*.yaml` / `wedetect_*.pt` | Detect (open-vocab) | ✅ | ✅ | ✅ | ✅ dual/whole |
-| WeDetect-Uni | `wedetect-uni-*.yaml` | Detect (learnable prompts) | ✅ | ✅ | ✅ | ✅ |
+| Model        | Config / weights                    | Task                       | Train | Val | Predict | Export        |
+| ------------ | ----------------------------------- | -------------------------- | ----- | --- | ------- | ------------- |
+| WeDetect     | `wedetect-*.yaml` / `wedetect_*.pt` | Detect (open-vocab)        | ✅    | ✅  | ✅      | ✅ dual/whole |
+| WeDetect-Uni | `wedetect-uni-*.yaml`               | Detect (learnable prompts) | ✅    | ✅  | ✅      | ✅            |
 
 ## Config files
 
-| File | Use |
-| ---- | --- |
-| `ultralytics/cfg/wedetect_finetune.yaml` | OV fine-tune (`freeze_text_encoder=False`, `lr0=5e-6`, `text_lr_mult=0.01`) |
-| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml` | OV + `mask_refine` (closer to original `lr0=2e-5` / `close_mosaic=4`) |
-| `ultralytics/cfg/wedetect_scratch.yaml` | From-scratch mixed training |
-| `ultralytics/cfg/default.yaml` | Global defaults (`freeze_text_encoder=True`, `export_mode=dual`, pseudo / val-fitness keys) |
+| File                                                 | Use                                                                                         |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `ultralytics/cfg/wedetect_finetune.yaml`             | OV fine-tune (`freeze_text_encoder=False`, `lr0=5e-6`, `text_lr_mult=0.01`)                 |
+| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml` | OV + `mask_refine` (closer to original `lr0=2e-5` / `close_mosaic=4`)                       |
+| `ultralytics/cfg/wedetect_scratch.yaml`              | From-scratch mixed training                                                                 |
+| `ultralytics/cfg/default.yaml`                       | Global defaults (`freeze_text_encoder=True`, `export_mode=dual`, pseudo / val-fitness keys) |
 
 Pass `cfg=wedetect_finetune.yaml` for OV work. Training with only `default.yaml` freezes the text tower.
 

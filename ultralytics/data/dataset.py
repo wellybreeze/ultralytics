@@ -483,9 +483,8 @@ class YOLODataset(BaseDataset):
 class _NegQueue:
     """Fixed-size negative text queue for open-vocabulary training.
 
-    Maintains a bounded set of negative samples with random eviction.
-    ``enrich`` appends queue entries not present in *class_texts*.
-    Follows the original WeDetect ``NegQueue`` implementation.
+    Maintains a bounded set of negative samples with random eviction. ``enrich`` appends queue entries not present in
+    *class_texts*. Follows the original WeDetect ``NegQueue`` implementation.
     """
 
     def __init__(self, size: int = 80):
@@ -675,9 +674,7 @@ class YOLOMultiModalDataset(YOLODataset):
         parsed = [row for row in parsed if row]
         LOGGER.info(f"Loaded class_texts from '{p}' ({len(parsed)} classes)")
         if nc > 0 and len(parsed) < nc:
-            LOGGER.warning(
-                f"class_texts count ({len(parsed)}) < nc ({nc}); missing classes will fall back at runtime"
-            )
+            LOGGER.warning(f"class_texts count ({len(parsed)}) < nc ({nc}); missing classes will fall back at runtime")
         elif nc > 0 and len(parsed) > nc:
             LOGGER.info(
                 f"class_texts has {len(parsed) - nc} extra entries beyond nc={nc} "
@@ -700,8 +697,7 @@ class YOLOMultiModalDataset(YOLODataset):
         across all datasets simultaneously.
 
         Args:
-            global_texts: Flat list of text lists from ALL datasets, e.g.
-                ``[["cat"], ["dog"], ["person"], ["car"]]``.
+            global_texts: Flat list of text lists from ALL datasets, e.g. ``[["cat"], ["dog"], ["person"], ["car"]]``.
             local_to_global: Mapping from this dataset's local class ID to the
                 index in ``global_texts``, e.g. ``{0: 2, 1: 3}`` means local
                 class 0 maps to global "person" and local 1 maps to global "car".
@@ -821,17 +817,16 @@ class YOLOMultiModalDataset(YOLODataset):
 def build_global_class_texts(datasets: list) -> list[list[str]]:
     """Merge per-dataset class texts into a shared open-vocabulary table.
 
-    Synonym groups that share any string (case-insensitive) are unioned so that
-    inconsistent local ids (e.g. dataset A ``0=车``, dataset B ``2=汽车``) map to
-    the same global class. Mirrors original WeDetect ``WeConcatDataset.init_texts``
+    Synonym groups that share any string (case-insensitive) are unioned so that inconsistent local ids (e.g. dataset A
+    ``0=车``, dataset B ``2=汽车``) map to the same global class. Mirrors original WeDetect ``WeConcatDataset.init_texts``
     intent while keeping Ultralytics ``list[list[str]]`` training format.
 
     Args:
         datasets: Dataset instances; only ``YOLOMultiModalDataset`` participate.
 
     Returns:
-        (list[list[str]]): Unified global class texts. Empty if fewer than two
-            multimodal datasets (caller should keep local texts).
+        (list[list[str]]): Unified global class texts. Empty if fewer than two multimodal datasets (caller should keep
+            local texts).
     """
     multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
     if len(multimodal) < 2:
@@ -897,8 +892,8 @@ def build_global_class_texts(datasets: list) -> list[list[str]]:
 def attach_shared_neg_queue(datasets: list, size: int = 80) -> _NegQueue | None:
     """Attach one shared ``_NegQueue`` to all multimodal datasets (WeDetect-style).
 
-    Across a concat of heterogeneous datasets, recently seen class names become
-    dynamic negatives even when a subset's local ``class_texts`` is tiny.
+    Across a concat of heterogeneous datasets, recently seen class names become dynamic negatives even when a subset's
+    local ``class_texts`` is tiny.
     """
     multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
     if not multimodal:

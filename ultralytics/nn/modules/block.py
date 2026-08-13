@@ -173,9 +173,7 @@ class HGBlock(nn.Module):
         super().__init__()
         act = nn.ReLU() if act is None else act
         block = LightConv if lightconv else Conv
-        self.m = nn.ModuleList(
-            block(c1 if i == 0 else cm, cm, k=k, act=act, use_lab=use_lab) for i in range(n)
-        )
+        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act, use_lab=use_lab) for i in range(n))
         self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act, use_lab=use_lab)  # squeeze conv
         self.ec = Conv(c2 // 2, c2, 1, 1, act=act, use_lab=use_lab)  # excitation conv
         self.add = shortcut and c1 == c2
@@ -787,8 +785,8 @@ class BNContrastiveHead(nn.Module):
 
     Args:
         embed_dims (int): Embed dimensions of text and image features.
-        normalize_text (bool): Whether to L2-normalize text features. Default: True.
-            Set to False for WeDetect-Uni models where learnable prompts are not normalized.
+        normalize_text (bool): Whether to L2-normalize text features. Default: True. Set to False for WeDetect-Uni
+            models where learnable prompts are not normalized.
     """
 
     def __init__(self, embed_dims: int, normalize_text: bool = True):
@@ -2129,8 +2127,8 @@ class ConvNeXtBlock(nn.Module):
 class ConvNeXt(nn.Module):
     """ConvNeXt backbone producing multi-scale feature maps.
 
-    Returns a tuple of feature maps from each stage.  When ``out_indices``
-    is set, only the specified stages are returned.
+    Returns a tuple of feature maps from each stage. When ``out_indices`` is set, only the specified stages are
+    returned.
 
     Args:
         depths (list[int]): Number of blocks per stage.
@@ -2175,7 +2173,9 @@ class ConvNeXt(nn.Module):
             self.stages.append(
                 nn.Sequential(
                     *[
-                        ConvNeXtBlock(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value)
+                        ConvNeXtBlock(
+                            dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value
+                        )
                         for j in range(depths[i])
                     ]
                 )
@@ -2216,8 +2216,7 @@ class _ConvNeXtChannelNorm(nn.Module):
 class CSPRepBiFPAN(nn.Module):
     """CSP Reparameterised Bi-directional Feature Pyramid Network neck.
 
-    Uses BiFusion modules for bi-directional feature fusion combined with
-    BepC3 blocks for feature extraction.
+    Uses BiFusion modules for bi-directional feature fusion combined with BepC3 blocks for feature extraction.
 
     Args:
         c2 (int): Channels for P2 level features from backbone.
@@ -2238,8 +2237,17 @@ class CSPRepBiFPAN(nn.Module):
     }
     _base_channels = [64, 128, 256, 512, 1024, 256, 128, 128, 256, 256, 512]
 
-    def __init__(self, c2=128, c3=256, c4=512, c5=1024, scale_factor=0.75, model_size="base",
-                 channels_list=None, num_repeats=None):
+    def __init__(
+        self,
+        c2=128,
+        c3=256,
+        c4=512,
+        c5=1024,
+        scale_factor=0.75,
+        model_size="base",
+        channels_list=None,
+        num_repeats=None,
+    ):
         super().__init__()
         ch = channels_list if channels_list is not None else self._base_channels
         sf = scale_factor
@@ -2306,8 +2314,8 @@ class _CSPConv(nn.Module):
 class _BiFusion(nn.Module):
     """Bi-directional fusion module for CSPRepBiFPAN.
 
-    Upsamples the highest-level feature, 1x1 convs the mid-level feature,
-    and downsamples the lowest-level feature, then concatenates and fuses.
+    Upsamples the highest-level feature, 1x1 convs the mid-level feature, and downsamples the lowest-level feature, then
+    concatenates and fuses.
 
     Args:
         in_channels (list[int]): Channels of the two lower-level inputs [mid, low].

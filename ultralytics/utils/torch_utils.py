@@ -456,7 +456,9 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
     fused = " (fused)" if getattr(model, "is_fused", lambda: False)() else ""
     fs = f", {flops:.1f} GFLOPs" if flops else ""
     yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
-    model_name = Path(yaml_file).stem.replace("yolo", "YOLO").replace("rf-detr", "RFDETR").replace("rfdetr", "RFDETR") or "Model"
+    model_name = (
+        Path(yaml_file).stem.replace("yolo", "YOLO").replace("rf-detr", "RFDETR").replace("rfdetr", "RFDETR") or "Model"
+    )
     LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
     return n_l, n_p, n_g, flops
 
@@ -541,7 +543,7 @@ def get_flops(model, imgsz=640):
 
     try:
         from ultralytics.nn.modules.block import AAttn, Attention  # imported here: block.py imports this module
-        from ultralytics.nn.modules.dfine import DFINEDecoder
+        from ultralytics.nn.modules.define import DFINEDecoder
         from ultralytics.nn.modules.head import RTDETRDecoder
 
         model = unwrap_model(model)

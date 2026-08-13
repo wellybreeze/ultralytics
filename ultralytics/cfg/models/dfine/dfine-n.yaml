@@ -1,7 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # D-FINE-N (HGNetv2-B0) — 2 FPN levels (P4/P5 only)
-# Matches D-FINE configs/dfine/dfine_hgnetv2_n_coco.yml
+# Matches D-FINE configs/define/dfine_hgnetv2_n_coco.yml
 # (return_idx [2,3], hd=128, expansion=0.34, depth_mult=0.5, nl=3, use_lab=True)
 
 # Parameters

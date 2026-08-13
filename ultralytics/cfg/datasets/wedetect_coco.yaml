@@ -7,10 +7,10 @@
 #     └── coco ← downloads here
 
 # Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
-path: coco  # dataset root dir
-train: train2017.txt  # train images (relative to 'path') 118287 images
-val: val2017.txt  # val images (relative to 'path') 5000 images
-test: test-dev2017.txt  # test images (optional)
+path: coco # dataset root dir
+train: train2017.txt # train images (relative to 'path') 118287 images
+val: val2017.txt # val images (relative to 'path') 5000 images
+test: test-dev2017.txt # test images (optional)
 
 # Class texts for open-vocabulary detection (overrides names for text encoding / val prompts).
 # Format: JSON list of lists, e.g. [["人"], ["自行车"], ...] or [["aerosol can", "spray can"], ...].

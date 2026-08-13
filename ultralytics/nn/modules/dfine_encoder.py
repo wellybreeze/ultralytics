@@ -14,10 +14,10 @@ Do not replace the YOLO blocks — use ``DFINERepNCSPELAN4`` / ``DFINESCDown`` i
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
-__all__ = ("ConvNormLayer", "ConvNormLayer_fuse", "VGGBlock", "CSPLayer", "DFINESCDown", "DFINERepNCSPELAN4")
+__all__ = ("CSPLayer", "ConvNormLayer", "ConvNormLayer_fuse", "DFINERepNCSPELAN4", "DFINESCDown", "VGGBlock")
 
 
 def get_activation(act: str | nn.Module | None, inplace: bool = True) -> nn.Module:

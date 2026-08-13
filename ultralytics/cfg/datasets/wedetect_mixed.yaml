@@ -20,7 +20,7 @@
 train:
   yolo_data:
     # - path/to/my_domain.yaml          # e.g. only "车" annotated; can still ship a large class_texts
-    - ultralytics/cfg/datasets/customer/wedetect_dataset.yaml                        # or wedetect_coco.yaml with class_texts
+    - ultralytics/cfg/datasets/customer/wedetect_dataset.yaml # or wedetect_coco.yaml with class_texts
   # grounding_data:                     # optional grounding / referring (COCO-style JSON, not JSONL)
   #   - img_path: path/to/images
   #     json_file: path/to/annotations.json  # {"images":[...],"annotations":[...]} + caption/tokens_positive

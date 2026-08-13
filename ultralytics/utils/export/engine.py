@@ -16,9 +16,9 @@ from ultralytics.utils.torch_utils import TORCH_2_4, TORCH_2_9
 def apply_builder_optimization_level(config, level: int | None, prefix: str = "") -> None:
     """Set TensorRT ``IBuilderConfig.builder_optimization_level`` when supported.
 
-    Corresponds to ``trtexec --builderOptimizationLevel``. Higher levels spend more build time
-    searching tactics (often better runtime); lower levels build faster. Valid range is 0-5
-    (TensorRT default 3). ``None`` leaves the TensorRT default unchanged.
+    Corresponds to ``trtexec --builderOptimizationLevel``. Higher levels spend more build time searching tactics (often
+    better runtime); lower levels build faster. Valid range is 0-5 (TensorRT default 3). ``None`` leaves the TensorRT
+    default unchanged.
 
     Args:
         config: TensorRT builder config instance.
@@ -262,8 +262,8 @@ def onnx2engine(
         metadata (dict | None): Metadata to include in the engine file.
         verbose (bool, optional): Enable verbose logging.
         prefix (str, optional): Prefix for log messages.
-        builder_optimization_level (int | None): TensorRT builder optimization level ``[0, 5]``
-            (``trtexec --builderOptimizationLevel``); ``None`` keeps the TensorRT default (3).
+        builder_optimization_level (int | None): TensorRT builder optimization level ``[0, 5]`` (``trtexec
+            --builderOptimizationLevel``); ``None`` keeps the TensorRT default (3).
 
     Returns:
         (str): Path to the exported engine file.

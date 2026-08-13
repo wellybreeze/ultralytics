@@ -2,11 +2,11 @@
 """Prediction support for native RF-DETR models."""
 
 import torch
+from rfdetr.models.postprocess import PostProcess
 
 from ultralytics.data.augment import LetterBox
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
-from rfdetr.models.postprocess import PostProcess
 from ultralytics.utils import ops
 
 
@@ -24,9 +24,7 @@ class RFDETRPredictor(BasePredictor):
             preds = preds[0]
         if not isinstance(orig_imgs, list):
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)[..., ::-1]
-        target_sizes = torch.as_tensor(
-            [image.shape[:2] for image in orig_imgs], device=img.device, dtype=img.dtype
-        )
+        target_sizes = torch.as_tensor([image.shape[:2] for image in orig_imgs], device=img.device, dtype=img.dtype)
         config = getattr(self.model, "model_config", None)
         postprocessor = PostProcess(
             num_select=getattr(config, "num_select", self.args.max_det),

@@ -89,9 +89,9 @@ from ultralytics.nn.modules import (
     Classify,
     Depth,
     Detect,
+    DFINEDecoder,
     Pose,
     Pose26,
-    DFINEDecoder,
     RTDETRDecoder,
     Segment,
     Segment26,
@@ -100,7 +100,14 @@ from ultralytics.nn.modules import (
 
 # DETR-style decoders share export / NMS constraints (end2end, opset, max_det clamp).
 _DETR_DECODERS = (RTDETRDecoder, DFINEDecoder)
-from ultralytics.nn.tasks import ClassificationModel, DepthModel, DetectionModel, SegmentationModel, WeDetectModel, WorldModel
+from ultralytics.nn.tasks import (
+    ClassificationModel,
+    DepthModel,
+    DetectionModel,
+    SegmentationModel,
+    WeDetectModel,
+    WorldModel,
+)
 from ultralytics.utils import (
     ARM64,
     DEFAULT_CFG,
@@ -182,7 +189,18 @@ def export_formats():
             ".engine",
             False,
             True,
-            ["batch", "data", "dynamic", "quantize", "opset", "simplify", "workspace", "nms", "fraction", "builder_optimization_level"],
+            [
+                "batch",
+                "data",
+                "dynamic",
+                "quantize",
+                "opset",
+                "simplify",
+                "workspace",
+                "nms",
+                "fraction",
+                "builder_optimization_level",
+            ],
             "base",
         ],
         ["CoreML", "coreml", ".mlpackage", True, False, ["batch", "dynamic", "quantize", "nms"], "coreml"],
@@ -823,7 +841,9 @@ class Exporter:
                 )
             if export_mode in {"dual", "whole"}:
                 self.file = Path(
-                    getattr(model, "pt_path", None) or getattr(model, "yaml_file", None) or model.yaml.get("yaml_file", "")
+                    getattr(model, "pt_path", None)
+                    or getattr(model, "yaml_file", None)
+                    or model.yaml.get("yaml_file", "")
                 )
                 if self.file.suffix in {".yaml", ".yml"}:
                     self.file = Path(self.file.name)
@@ -1075,7 +1095,9 @@ class Exporter:
         from ultralytics.utils.export.engine import best_onnx_opset, torch2onnx
 
         opset = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type, quantize=self.args.quantize)
-        assert not isinstance(self.model.model[-1], _DETR_DECODERS) or opset >= 16, "RTDETR/DFINE export requires opset>=16"
+        assert not isinstance(self.model.model[-1], _DETR_DECODERS) or opset >= 16, (
+            "RTDETR/DEFINE export requires opset>=16"
+        )
         LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset}...")
         if self.args.nms:
             assert TORCH_1_13, f"'nms=True' ONNX export requires torch>=1.13 (found torch=={TORCH_VERSION})"
@@ -1198,7 +1220,7 @@ class Exporter:
             ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
             requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
         check_requirements(requirements)
-        import onnx  # noqa: F401
+        import onnx
 
         from ultralytics.utils.export.engine import best_onnx_opset
         from ultralytics.utils.export.wedetect import export_wedetect_onnx
@@ -1259,7 +1281,7 @@ class Exporter:
             ort = "onnxruntime-gpu" if "cuda" in self.device.type else "onnxruntime"
             requirements += [(ort, "onnxruntime", "onnxruntime-gpu", "onnxruntime-qnn"), "onnxslim>=0.1.82"]
         check_requirements(requirements)
-        import onnx  # noqa: F401
+        import onnx
 
         from ultralytics.utils.export.engine import best_onnx_opset
         from ultralytics.utils.export.wedetect import export_wedetect_engine
@@ -1544,7 +1566,7 @@ class Exporter:
         # Export to ONNX
         if isinstance(self.model.model[-1], _DETR_DECODERS):
             self.args.opset = self.args.opset or 19
-            assert 16 <= self.args.opset <= 19, "RTDETR/DFINE TensorFlow export requires opset>=16;<=19"
+            assert 16 <= self.args.opset <= 19, "RTDETR/DEFINE TensorFlow export requires opset>=16;<=19"
         self.args.simplify = True
         f_onnx = self.export_onnx()  # ensure ONNX is available
         keras_model = onnx2saved_model(

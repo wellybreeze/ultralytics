@@ -22,8 +22,8 @@ from copy import deepcopy
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from ultralytics.utils import LOGGER, colorstr, is_dgx, is_jetson
 from ultralytics.utils.checks import check_requirements, check_tensorrt, check_version
@@ -135,9 +135,9 @@ class WeDetectWholeExport(nn.Module):
 class WeDetectVisionNMSExport(nn.Module):
     """Vision tower + TorchScript-friendly class-aware NMS → ``(B, max_det, 6)``.
 
-    Uses ``torchvision.ops.batched_nms`` (faster than Python gather of ONNX indices).
-    Trace with ``txt_feats`` padded to ``max_classes`` so the class axis is stable while
-    open-vocabulary prompts remain swappable via the separate language tower.
+    Uses ``torchvision.ops.batched_nms`` (faster than Python gather of ONNX indices). Trace with ``txt_feats`` padded to
+    ``max_classes`` so the class axis is stable while open-vocabulary prompts remain swappable via the separate language
+    tower.
     """
 
     def __init__(
@@ -251,8 +251,8 @@ def export_wedetect_onnx(
         simplify: Whether to slim graphs with onnxslim when available.
         device: Export device.
         prefix: Log prefix.
-        nms: If True, append ONNX-native ``NonMaxSuppression`` (ORT-runnable) to the
-            vision/whole graph. Distinct from TensorRT ``EfficientNMS_TRT``.
+        nms: If True, append ONNX-native ``NonMaxSuppression`` (ORT-runnable) to the vision/whole graph. Distinct from
+            TensorRT ``EfficientNMS_TRT``.
         max_det / conf / iou: Native NMS parameters when ``nms=True``.
         max_classes: Stored in metadata (prompt ceiling for DualBackend padding).
 
@@ -392,15 +392,14 @@ def append_wedetect_onnx_nms(
 ) -> str:
     """Append ONNX-native ``NonMaxSuppression`` to a WeDetect vision/whole graph.
 
-    Runnable in ONNX Runtime (unlike ``EfficientNMS_TRT``). Keeps decoded ``bboxes``
-    (xyxy) and ``scores`` as outputs and adds ``nms_indices`` ``[M,3]`` =
-    ``[batch, class, box]`` for DualBackend gather packing.
+    Runnable in ONNX Runtime (unlike ``EfficientNMS_TRT``). Keeps decoded ``bboxes`` (xyxy) and ``scores`` as outputs
+    and adds ``nms_indices`` ``[M,3]`` = ``[batch, class, box]`` for DualBackend gather packing.
 
     Args:
         onnx_file: Path to ``*_vision.onnx`` or ``*_whole.onnx``.
         output_file: Destination path (default: overwrite ``onnx_file``).
-        max_det: ``max_output_boxes_per_class`` for the NMS node (then packed to
-            ``max_det`` total detections in DualBackend).
+        max_det: ``max_output_boxes_per_class`` for the NMS node (then packed to ``max_det`` total detections in
+            DualBackend).
         conf / iou: Score / IoU thresholds.
         max_classes: Written to metadata for DualBackend.
         prefix: Log prefix.
@@ -428,7 +427,9 @@ def append_wedetect_onnx_nms(
 
     # scores [B,N,K] -> [B,K,N] for ONNX NonMaxSuppression
     scores_bkn = gs.Variable(name="scores_bkn", dtype=np.float32)
-    graph.layer(op="Transpose", name="scores_BNK_to_BKN", inputs=[scores], outputs=[scores_bkn], attrs={"perm": [0, 2, 1]})
+    graph.layer(
+        op="Transpose", name="scores_BNK_to_BKN", inputs=[scores], outputs=[scores_bkn], attrs={"perm": [0, 2, 1]}
+    )
 
     # boxes xyxy -> yxyx (center_point_box=0 TensorFlow corner format)
     split_sizes = gs.Constant("nms_box_split", np.array([1, 1, 1, 1], dtype=np.int64))
@@ -498,9 +499,8 @@ def append_wedetect_efficient_nms(
 ) -> str:
     """Append TensorRT ``EfficientNMS_TRT`` to a WeDetect dual vision ONNX graph.
 
-    Vision export already yields ``bboxes`` (xyxy) and ``scores``; this only adds the
-    NMS plugin (no YOLO Concat rewrite). The resulting ONNX is for TensorRT build only
-    and is not runnable in standard ONNX Runtime.
+    Vision export already yields ``bboxes`` (xyxy) and ``scores``; this only adds the NMS plugin (no YOLO Concat
+    rewrite). The resulting ONNX is for TensorRT build only and is not runnable in standard ONNX Runtime.
 
     Args:
         onnx_file: Path to ``*_vision.onnx``.
@@ -601,8 +601,8 @@ def _inject_native_nms(
 ) -> None:
     """Replace vision graph outputs with boxes/scores + TensorRT ``INMSLayer`` indices.
 
-    TensorRT 11 removed ``EfficientNMS_TRT``; native ``add_nms`` is the replacement.
-    Outputs: ``bboxes``, ``scores``, ``nms_indices`` ``[M,3]``, ``num_detections``.
+    TensorRT 11 removed ``EfficientNMS_TRT``; native ``add_nms`` is the replacement. Outputs: ``bboxes``, ``scores``,
+    ``nms_indices`` ``[M,3]``, ``num_detections``.
     """
     import numpy as np
 
@@ -684,7 +684,9 @@ def wedetect_onnx2engine(
         (str): Path to the written engine file.
     """
     if quantize == 8:
-        raise ValueError("WeDetect dual TensorRT INT8 export is not supported; use quantize=16 (FP16) or omit for FP32.")
+        raise ValueError(
+            "WeDetect dual TensorRT INT8 export is not supported; use quantize=16 (FP16) or omit for FP32."
+        )
 
     if is_jetson(jetpack=7) or is_dgx():
         check_tensorrt("10.15")
@@ -953,9 +955,9 @@ def export_wedetect_torchscript(
 ) -> list[str]:
     """Export WeDetect dual TorchScript towers with optional in-graph NMS.
 
-    Dual layout keeps open-vocabulary prompts: language encodes ``set_classes`` text,
-    vision consumes ``txt_feats``. When ``nms=True`` (default for speed), vision emits
-    packed ``(B, max_det, 6)`` via ``batched_nms`` so predictors skip Python NMS.
+    Dual layout keeps open-vocabulary prompts: language encodes ``set_classes`` text, vision consumes ``txt_feats``.
+    When ``nms=True`` (default for speed), vision emits packed ``(B, max_det, 6)`` via ``batched_nms`` so predictors
+    skip Python NMS.
 
     Args:
         model: ``WeDetectModel`` instance.
@@ -987,9 +989,11 @@ def export_wedetect_torchscript(
     vision = WeDetectVisionExport(prepared, imgsz=(h, w)).to(device).eval()
     language = WeDetectLanguageExport(text_encoder).to("cpu").eval()
     if nms:
-        vision = WeDetectVisionNMSExport(
-            vision, max_det=max_det, conf=conf, iou=iou, max_classes=max_classes
-        ).to(device).eval()
+        vision = (
+            WeDetectVisionNMSExport(vision, max_det=max_det, conf=conf, iou=iou, max_classes=max_classes)
+            .to(device)
+            .eval()
+        )
 
     dummy_img = torch.zeros(1, 3, h, w, device=device)
     # Non-zero text feats so NMS control-flow / batched_nms is recorded under jit.trace

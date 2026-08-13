@@ -20,9 +20,6 @@ from ultralytics.nn.modules import (
     C2PSA,
     C3,
     C3TR,
-    CSPRepBiFPAN,
-    ConvNeXt,
-    ConvNeXtBlock,
     ELAN1,
     OBB,
     OBB26,
@@ -48,7 +45,9 @@ from ultralytics.nn.modules import (
     Concat,
     Conv,
     Conv2,
+    ConvNeXt,
     ConvTranspose,
+    CSPRepBiFPAN,
     Depth,
     Detect,
     DFINEDecoder,
@@ -900,9 +899,7 @@ class RFDETRDetectionModel(BaseModel):
     def __init__(self, cfg="rfdetr-nano.yaml", ch=3, nc=None, verbose=True):
         """Initialize RF-DETR from an Ultralytics RF-DETR YAML dictionary or path."""
         super().__init__()
-        from ultralytics.models.rfdetr.build import build_rfdetr_model
-
-        from ultralytics.models.rfdetr.build import rfdetr_class_names
+        from ultralytics.models.rfdetr.build import build_rfdetr_model, rfdetr_class_names
 
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
         self.model, self.model_config, class_names = build_rfdetr_model(cfg=self.yaml, nc=nc, verbose=verbose)
@@ -984,9 +981,7 @@ class RFDETRDetectionModel(BaseModel):
                 masks = batch["masks"].to(img.device)
                 if getattr(self, "overlap_mask", False):
                     count = int(index.sum())
-                    target["masks"] = (
-                        masks[i] == torch.arange(1, count + 1, device=img.device).view(-1, 1, 1)
-                    ).float()
+                    target["masks"] = (masks[i] == torch.arange(1, count + 1, device=img.device).view(-1, 1, 1)).float()
                 else:
                     target["masks"] = masks[index].float()
             if self.model_config.use_grouppose_keypoints and "keypoints" in batch:
@@ -1213,8 +1208,8 @@ class RTDETRDetectionModel(DetectionModel):
 class DFINEDetectionModel(RTDETRDetectionModel):
     """D-FINE Detection Model using FDR decoder losses (VFL + L1/GIoU + FGL + DDF).
 
-    Reuses ``RTDETRDetectionModel.predict`` (head receives Ultralytics batch for CDN).
-    Only BN parity hooks and ``DFINEDetectionLoss`` differ from RT-DETR.
+    Reuses ``RTDETRDetectionModel.predict`` (head receives Ultralytics batch for CDN). Only BN parity hooks and
+    ``DFINEDetectionLoss`` differ from RT-DETR.
     """
 
     def __init__(self, cfg="dfine-l.yaml", ch=3, nc=None, verbose=True):
@@ -1226,9 +1221,9 @@ class DFINEDetectionModel(RTDETRDetectionModel):
         # L/X (and Objects365 variants) set HGNetv2.freeze_norm=True → FrozenBatchNorm2d.
         if self.yaml.get("freeze_norm", False):
             self._freeze_backbone_norm()
-    
+
     def fuse(self, verbose=True, imgsz=640):
-        """Fuse like official ``DFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
+        """Fuse like official ``DEFINE.deploy()`` (not YOLO backbone Conv+BN fuse).
 
         Official deploy calls ``convert_to_deploy`` on ``ConvNormLayer_fuse`` / ``VGGBlock`` / decoder
         heads. YAML maps HybridEncoder ``lateral_convs`` to top-level ``Conv(..., act=False)`` layers
@@ -1758,11 +1753,9 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
 class WeDetectModel(DetectionModel):
     """WeDetect open-vocabulary detection model with ConvNeXt + XLM-RoBERTa.
 
-    Unlike WorldModel (which uses YOLO CNN backbone + CLIP), WeDetect uses a
-    ConvNeXt vision backbone and XLM-RoBERTa text encoder.  The model is
-    assembled programmatically rather than via ``parse_model`` because the
-    ConvNeXt backbone and CSPRepBiFPAN neck are monolithic modules that do not
-    decompose into individual YOLO-style layers.
+    Unlike WorldModel (which uses YOLO CNN backbone + CLIP), WeDetect uses a ConvNeXt vision backbone and XLM-RoBERTa
+    text encoder. The model is assembled programmatically rather than via ``parse_model`` because the ConvNeXt backbone
+    and CSPRepBiFPAN neck are monolithic modules that do not decompose into individual YOLO-style layers.
 
     Attributes:
         txt_feats (torch.Tensor): Cached text feature embeddings.
@@ -1871,8 +1864,13 @@ class WeDetectModel(DetectionModel):
             int(512 * sf),
         ]
         head = WeDetectDetect.from_config(
-            nc=nc, embed=cfg["embed"], with_bn=True, reg_max=16, end2end=False,
-            ch=tuple(neck_out_channels), head_in_channels=[256, 512, 1024],
+            nc=nc,
+            embed=cfg["embed"],
+            with_bn=True,
+            reg_max=16,
+            end2end=False,
+            ch=tuple(neck_out_channels),
+            head_in_channels=[256, 512, 1024],
         )
         model = nn.ModuleList([backbone, neck, head])
         save = []
@@ -1895,7 +1893,7 @@ class WeDetectModel(DetectionModel):
         text_sd = None
         if isinstance(weights, dict) and weights.get("text_model_weights"):
             text_sd = weights["text_model_weights"]
-        if text_sd is None and hasattr(src, "_text_sd") and getattr(src, "_text_sd") is not None:
+        if text_sd is None and hasattr(src, "_text_sd") and src._text_sd is not None:
             text_sd = src._text_sd
         if text_sd is not None:
             self._text_sd = deepcopy(text_sd)
@@ -2081,9 +2079,8 @@ class WeDetectModel(DetectionModel):
 class WeDetectUniModel(DetectionModel):
     """WeDetect-Uni unified detection model with learnable prompt embeddings.
 
-    Unlike WeDetectModel (which uses XLM-RoBERTa text encoder), WeDetectUniModel
-    uses learnable ``embeddings`` parameters as text features, eliminating the
-    need for a text encoder at inference time.
+    Unlike WeDetectModel (which uses XLM-RoBERTa text encoder), WeDetectUniModel uses learnable ``embeddings``
+    parameters as text features, eliminating the need for a text encoder at inference time.
 
     Attributes:
         embeddings (nn.Parameter): Learnable prompt embeddings, shape (num_prompts, prompt_dim).
@@ -2183,8 +2180,13 @@ class WeDetectUniModel(DetectionModel):
             int(512 * sf),
         ]
         head = WeDetectDetect.from_config(
-            nc=nc, embed=cfg["embed"], with_bn=True, reg_max=16, end2end=False,
-            ch=tuple(neck_out_channels), head_in_channels=[256, 512, 1024],
+            nc=nc,
+            embed=cfg["embed"],
+            with_bn=True,
+            reg_max=16,
+            end2end=False,
+            ch=tuple(neck_out_channels),
+            head_in_channels=[256, 512, 1024],
             normalize_text=True,
         )
         model = nn.ModuleList([backbone, neck, head])
@@ -2209,7 +2211,7 @@ class WeDetectUniModel(DetectionModel):
         """Get text positional embeddings using XLM-RoBERTa.
 
         Used by :class:`WeDetectUniTrainer` to generate initial text
-        embeddings for ``self.embeddings`` initialisation.  The embeddings
+        embeddings for ``self.embeddings`` initialization.  The embeddings
         are then used directly as learnable parameters (no fuse operation).
 
         Args:
@@ -2227,7 +2229,11 @@ class WeDetectUniModel(DetectionModel):
         text_model_variant = self.yaml.get("text_model", "xlm-roberta:base")
         if not getattr(self, "clip_model", None) and cache_text_model:
             self.clip_model = build_text_model(text_model_variant, device=device, state_dict=text_sd)
-        model = self.clip_model if cache_text_model else build_text_model(text_model_variant, device=device, state_dict=text_sd)
+        model = (
+            self.clip_model
+            if cache_text_model
+            else build_text_model(text_model_variant, device=device, state_dict=text_sd)
+        )
         txt_feats = model.encode_text([text])
         return txt_feats.reshape(-1, len(text), txt_feats.shape[-1])
 

@@ -4,10 +4,10 @@
 from pathlib import Path
 
 import torch
+from rfdetr.models.postprocess import PostProcess
 
 from ultralytics.data import YOLODataset
 from ultralytics.models.yolo.detect import DetectionValidator
-from rfdetr.models.postprocess import PostProcess
 from ultralytics.utils import colorstr, ops
 
 
@@ -48,9 +48,7 @@ class RFDETRValidator(DetectionValidator):
             preds = preds[0]
         if not isinstance(preds, dict):
             raise TypeError(f"Expected RF-DETR output dictionary, received {type(preds).__name__}.")
-        size = torch.full(
-            (preds["pred_logits"].shape[0], 2), self.args.imgsz, device=preds["pred_logits"].device
-        )
+        size = torch.full((preds["pred_logits"].shape[0], 2), self.args.imgsz, device=preds["pred_logits"].device)
         trainer_model = getattr(getattr(self, "trainer", None), "model", None)
         config = getattr(trainer_model, "model_config", None) or getattr(self, "model_config", None)
         outputs = PostProcess(

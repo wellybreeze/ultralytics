@@ -1861,9 +1861,8 @@ class RTDETRDecoder(nn.Module):
 class WeDetectDetect(Detect):
     """WeDetect detection head for open-vocabulary detection with XLM-RoBERTa text features.
 
-    Similar to WorldDetect but adapted for ConvNeXt backbone channel dimensions
-    and XLM-RoBERTa text embeddings. Uses BNContrastiveHead for text-vision
-    alignment.
+    Similar to WorldDetect but adapted for ConvNeXt backbone channel dimensions and XLM-RoBERTa text embeddings. Uses
+    BNContrastiveHead for text-vision alignment.
 
     Args:
         nc (int): Number of classes.
@@ -1897,10 +1896,10 @@ class WeDetectDetect(Detect):
         obj.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * reg_max, 1)) for x in ch
         )
-        obj.cv3 = nn.ModuleList(
-            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch
+        obj.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
+        obj.cv4 = nn.ModuleList(
+            BNContrastiveHead(embed, normalize_text=normalize_text) if with_bn else ContrastiveHead() for _ in ch
         )
-        obj.cv4 = nn.ModuleList(BNContrastiveHead(embed, normalize_text=normalize_text) if with_bn else ContrastiveHead() for _ in ch)
         return obj
 
     def forward(self, x: list[torch.Tensor], text: torch.Tensor) -> dict[str, torch.Tensor] | tuple:
@@ -1913,7 +1912,7 @@ class WeDetectDetect(Detect):
         bs = x[0].shape[0]
         x_cat = torch.cat([xi.view(bs, self.no, -1) for xi in x], 2)
         boxes, scores = x_cat.split((self.reg_max * 4, nc), 1)
-        preds = dict(boxes=boxes, scores=scores, feats=feats)
+        preds = {"boxes": boxes, "scores": scores, "feats": feats}
         if self.training:
             return preds
         y = self._inference(preds)

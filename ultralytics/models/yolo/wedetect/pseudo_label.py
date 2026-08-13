@@ -19,15 +19,19 @@ from PIL import Image
 from ultralytics.data.dataset import DATASET_CACHE_VERSION
 from ultralytics.data.utils import (
     IMG_FORMATS,
-    dataset_root as _dataset_root,
     exif_size,
     get_hash,
     img2label_paths,
     load_dataset_cache_file,
     portable_paths_hash,
-    rel_path_key as _rel_key,
     remap_label_im_files,
     save_dataset_cache_file,
+)
+from ultralytics.data.utils import (
+    dataset_root as _dataset_root,
+)
+from ultralytics.data.utils import (
+    rel_path_key as _rel_key,
 )
 from ultralytics.utils import LOGGER, ROOT, TQDM, YAML, colorstr
 from ultralytics.utils.checks import check_file
@@ -63,12 +67,12 @@ def resolve_pseudo_cfg(data: dict | None, args: Any = None) -> dict[str, Any]:
     """Resolve pseudo-label settings for one dataset subset.
 
     Priority (highest first):
-      1) keys on the dataset dict (from that dataset's YAML)
-      2) trainer/global ``args`` (finetune yaml / CLI)
-      3) built-in defaults
+    1) keys on the dataset dict (from that dataset's YAML)
+    2) trainer/global ``args`` (finetune yaml / CLI)
+    3) built-in defaults
 
-    This lets mixed training enable pseudo labels only on selected subsets
-    (e.g. vehicle yes, LVIS no) without a global ``pseudo_label=True``.
+    This lets mixed training enable pseudo labels only on selected subsets (e.g. vehicle yes, LVIS no) without a global
+    ``pseudo_label=True``.
     """
     data = data or {}
 
@@ -183,8 +187,8 @@ def load_text_groups(path: str | Path | None, default: Path) -> list[list[str]]:
 def load_gt_text_groups(data: dict) -> list[list[str]]:
     """Build GT synonym groups from data names + optional **source** class_texts JSON.
 
-    Always prefers the original (non-``*_train``) file so regenerating pseudo labels
-    does not treat a previous merged vocab as GT.
+    Always prefers the original (non-``*_train``) file so regenerating pseudo labels does not treat a previous merged
+    vocab as GT.
     """
     names = data.get("names") or {}
     groups = _as_text_groups(names)
@@ -301,9 +305,9 @@ def build_merged_vocabulary(
     """Resolve class conflicts and build ordered vocabulary.
 
     Order (fixed):
-      1) annotated GT classes ``0 .. nc_gt-1`` (from names / class_texts prefix)
-      2) kept pseudo Chinese groups appended in original relative order (ids ``nc_gt+k``)
-      3) leftover original negatives after ``nc_gt`` that do not overlap kept pseudo
+    1) annotated GT classes ``0 .. nc_gt-1`` (from names / class_texts prefix)
+    2) kept pseudo Chinese groups appended in original relative order (ids ``nc_gt+k``)
+    3) leftover original negatives after ``nc_gt`` that do not overlap kept pseudo
 
     Returns:
         dict with keys: nc_gt, new_nc, new_names, new_texts, kept_ids, kept_en, kept_zh,
@@ -428,7 +432,7 @@ def _is_wedetect_ckpt(model: str) -> bool:
 def _is_dfine_ckpt(model: str) -> bool:
     """Return True if ``model`` is a D-FINE detect checkpoint or YAML."""
     stem = Path(model).stem.lower()
-    if "dfine" in stem:
+    if "define" in stem:
         return True
     try:
         import torch
@@ -452,10 +456,10 @@ def _dfine_teacher_cls_map(
 ) -> tuple[list[int], dict[int, int]]:
     """Map pseudo teacher source ids to D-FINE head class indices.
 
-    COCO checkpoints (``nc=80``) use contiguous ids. Objects365 checkpoints (``nc=366``)
-    reserve index 0 for background and match kept English prompts to head names.
+    COCO checkpoints (``nc=80``) use contiguous ids. Objects365 checkpoints (``nc=366``) reserve index 0 for background
+    and match kept English prompts to head names.
     """
-    from ultralytics.models.dfine.model import ensure_dfine_class_names
+    from ultralytics.models.define.model import ensure_dfine_class_names
 
     inner = getattr(model, "model", model)
     ensure_dfine_class_names(inner)
@@ -598,14 +602,14 @@ def auto_predict_batch(
         LOGGER.info(f"{colorstr('WeDetect pseudo:')} non-CUDA device, predict batch={batch}")
         return batch
 
-    predict_kw = dict(
-        conf=conf,
-        imgsz=imgsz,
-        device=device if device is not None else idx,
-        verbose=False,
-        save=False,
-        stream=False,
-    )
+    predict_kw = {
+        "conf": conf,
+        "imgsz": imgsz,
+        "device": device if device is not None else idx,
+        "verbose": False,
+        "save": False,
+        "stream": False,
+    }
     if classes is not None:
         predict_kw["classes"] = classes
 
@@ -715,9 +719,7 @@ def _ensure_teacher_predictor(model: Any, predict_kw: dict[str, Any]):
     device = args.get("device")
     predictor = getattr(model, "predictor", None)
     if predictor is None or getattr(getattr(predictor, "args", None), "device", None) != device:
-        predictor = model._smart_load("predictor")(
-            overrides=args, _callbacks=getattr(model, "callbacks", None)
-        )
+        predictor = model._smart_load("predictor")(overrides=args, _callbacks=getattr(model, "callbacks", None))
         predictor.setup_model(model=model.model, verbose=False)
         model.predictor = predictor
     else:
@@ -761,14 +763,12 @@ def _predict_path_list(
 ):
     """Stream predictions over image paths with true image-batch size ``bsz``.
 
-    Critical: do **not** pass a Python ``list`` of paths to ``model.predict``.
-    Ultralytics ``check_source`` treats lists via ``autocast_list`` →
-    ``LoadPilAndNumpy`` with ``bs=len(list)``, which loads the entire list into
-    **one** GPU batch (e.g. 512 images → OOM). A ``.txt`` source uses
-    ``LoadImagesAndVideos`` and respects ``batch=bsz``.
+    Critical: do **not** pass a Python ``list`` of paths to ``model.predict``. Ultralytics ``check_source`` treats lists
+    via ``autocast_list`` → ``LoadPilAndNumpy`` with ``bs=len(list)``, which loads the entire list into **one** GPU
+    batch (e.g. 512 images → OOM). A ``.txt`` source uses ``LoadImagesAndVideos`` and respects ``batch=bsz``.
 
-    When ``prefetch_batches > 0``, the next loader batch is read on a background
-    thread while the GPU runs inference on the current batch.
+    When ``prefetch_batches > 0``, the next loader batch is read on a background thread while the GPU runs inference on
+    the current batch.
     """
     from ultralytics.utils import ops
 
@@ -776,13 +776,13 @@ def _predict_path_list(
     work_dir.mkdir(parents=True, exist_ok=True)
     txt = work_dir / f".wedetect_pseudo_sources_{os.getpid()}.txt"
     txt.write_text("\n".join(str(p) for p in im_files) + "\n", encoding="utf-8")
-    predict_kw = dict(
-        conf=conf,
-        imgsz=imgsz,
-        device=device,
-        batch=int(bsz),
-        rect=False,  # fixed square letterbox → stable VRAM vs default rect=True
-    )
+    predict_kw = {
+        "conf": conf,
+        "imgsz": imgsz,
+        "device": device,
+        "batch": int(bsz),
+        "rect": False,  # fixed square letterbox → stable VRAM vs default rect=True
+    }
     if classes is not None:
         predict_kw["classes"] = classes
     predictor = _ensure_teacher_predictor(model, predict_kw)
@@ -804,7 +804,7 @@ def _predict_path_list(
         with lock if lock is not None else nullcontext():
             for batch in loader:
                 predictor.batch = batch
-                paths, im0s, _s = batch
+                _paths, im0s, _s = batch
                 with profilers[0]:
                     im = predictor.preprocess(im0s)
                 if not predictor.done_warmup:
@@ -847,11 +847,11 @@ def run_teacher_inference(
 ) -> dict[str, np.ndarray]:
     """Run teacher model; return {im_file: (N,5) with cls in 0..len(kept)-1}.
 
-    YOLO/WeDetect/DFINE use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0).
-    SAM3 does not support image batching; prompt chunk size is auto-tuned instead.
+    YOLO/WeDetect/DEFINE use image ``batch`` (auto from free VRAM when ``batch`` is None/<=0). SAM3 does not support
+    image batching; prompt chunk size is auto-tuned instead.
 
-    ``on_batch`` / ``on_image`` persist predictions (used for cache flush / crash resume).
-    Prefer ``on_batch`` to amortize cache I/O across loader batches.
+    ``on_batch`` / ``on_image`` persist predictions (used for cache flush / crash resume). Prefer ``on_batch`` to
+    amortize cache I/O across loader batches.
     """
     prompts_zh = [g[0] for g in kept_zh]
     out: dict[str, np.ndarray] = {}
@@ -896,17 +896,17 @@ def run_teacher_inference(
         # SAM3 stride=14; pre-align so check_imgsz does not warn (e.g. 640 → 644)
         sam_stride = 14
         sam_imgsz = int(max(math.ceil(int(imgsz) / sam_stride) * sam_stride, sam_stride))
-        overrides = dict(
-            conf=conf,
-            task="segment",
-            mode="predict",
-            model=model_path,
-            save=False,
-            verbose=False,
-            device=device if device is not None else "",
-            batch=1,  # SAM API is image-serial
-            imgsz=sam_imgsz,
-        )
+        overrides = {
+            "conf": conf,
+            "task": "segment",
+            "mode": "predict",
+            "model": model_path,
+            "save": False,
+            "verbose": False,
+            "device": device if device is not None else "",
+            "batch": 1,  # SAM API is image-serial
+            "imgsz": sam_imgsz,
+        }
         predictor = SAM3SemanticPredictor(overrides=overrides)
         step = (
             int(batch)
@@ -952,9 +952,7 @@ def run_teacher_inference(
         bsz = (
             int(batch)
             if batch is not None and int(batch) > 0
-            else auto_predict_batch(
-                model, device, im_files[0], conf=conf, imgsz=imgsz, fraction=mem_fraction
-            )
+            else auto_predict_batch(model, device, im_files[0], conf=conf, imgsz=imgsz, fraction=mem_fraction)
         )
         LOGGER.info(
             f"{colorstr('WeDetect pseudo:')} WeDetect teacher, {len(prompts_zh)} classes, "
@@ -975,9 +973,9 @@ def run_teacher_inference(
         return out
 
     if _is_dfine_ckpt(model_path):
-        from ultralytics import DFINE
+        from ultralytics import DEFINE
 
-        model = DFINE(model_path)
+        model = DEFINE(model_path)
         classes_filter, cls_to_kept = _dfine_teacher_cls_map(model, kept_src_ids, kept_en)
         if not classes_filter:
             LOGGER.warning(
@@ -1098,8 +1096,8 @@ def run_teacher_inference(
 def merge_labels(gt: np.ndarray, pseudo: np.ndarray, nc_gt: int) -> np.ndarray:
     """Keep GT ids; remap pseudo cls to ``nc_gt+k`` and append (no IoU suppress).
 
-    Class-level dedup is done earlier by filtering pseudo vocabulary against GT
-    synonyms; spatially overlapping boxes of different classes are kept.
+    Class-level dedup is done earlier by filtering pseudo vocabulary against GT synonyms; spatially overlapping boxes of
+    different classes are kept.
     """
     if gt.size == 0 and pseudo.size == 0:
         return np.zeros((0, 5), dtype=np.float32)
@@ -1205,7 +1203,7 @@ def merged_cache_hash(im_files: list[str], root: Path | None = None) -> str:
 def pseudo_only_cache_name(model: str | Path | None = None) -> str:
     """Return ``pseudo_labels-{model_stem}.cache`` for a teacher weight path.
 
-    Example:
+    Examples:
         ``./pretrained_weights/sam3.pt`` → ``pseudo_labels-sam3.cache``
     """
     stem = Path(str(model or "sam3.pt")).stem.strip() or "sam3"
@@ -1798,8 +1796,8 @@ def build_merged_pseudo_cache(
 def rebuild_merged_pseudo_cache(data: dict, im_files: list[str]) -> dict:
     """Rebuild merged cache from existing ``pseudo_labels-*.cache`` + GT (no teacher).
 
-    Used by ``YOLODataset.get_labels`` when ``labels_pseudo_merged.cache`` is missing/stale.
-    Remaps cached ``im_file`` paths so caches copied across machines still work.
+    Used by ``YOLODataset.get_labels`` when ``labels_pseudo_merged.cache`` is missing/stale. Remaps cached ``im_file``
+    paths so caches copied across machines still work.
     """
     if not im_files:
         raise RuntimeError("rebuild_merged_pseudo_cache: empty im_files")
@@ -1866,10 +1864,10 @@ def apply_pseudo_labels_to_subset(
     Config resolution (see ``resolve_pseudo_cfg``): dataset YAML keys override train args.
 
     Pipeline (fixed order):
-      1) resolve conflicts + build vocabulary (GT prefix, pseudo appended)
-      2) write merged texts to ``<stem>_train.json`` (source JSON untouched)
-      3) teacher inference -> ``pseudo_labels-{model_stem}.cache``
-      4) merge GT + pseudo -> ``labels_pseudo_merged.cache`` (no per-image txt)
+    1) resolve conflicts + build vocabulary (GT prefix, pseudo appended)
+    2) write merged texts to ``<stem>_train.json`` (source JSON untouched)
+    3) teacher inference -> ``pseudo_labels-{model_stem}.cache``
+    4) merge GT + pseudo -> ``labels_pseudo_merged.cache`` (no per-image txt)
     """
     cfg = resolve_pseudo_cfg(data, args)
     if not cfg["pseudo_label"]:
@@ -1957,11 +1955,7 @@ def apply_pseudo_labels_to_subset(
                 remapped_n = len(remap_label_im_files(list(pc.get("labels") or []), im_files, root))
             else:
                 remapped_n = 0
-            pseudo_ok = (
-                pc is not None
-                and remapped_n >= len(im_files)
-                and pc.get("complete", True)
-            )
+            pseudo_ok = pc is not None and remapped_n >= len(im_files) and pc.get("complete", True)
             if old.get("hash") == h and on_disk == new_texts and merged_ok and pseudo_ok:
                 LOGGER.info(
                     f"{colorstr('WeDetect pseudo:')} cache hit, reuse {m_cache_path.name} "
@@ -1979,9 +1973,7 @@ def apply_pseudo_labels_to_subset(
     # --- 2) write train class_texts (source JSON untouched) ---
     write_class_texts(class_texts_path, new_texts)
     if source_texts_path != class_texts_path and source_texts_path.exists():
-        LOGGER.info(
-            f"{colorstr('WeDetect pseudo:')} source class_texts kept as-is -> {source_texts_path}"
-        )
+        LOGGER.info(f"{colorstr('WeDetect pseudo:')} source class_texts kept as-is -> {source_texts_path}")
 
     # --- 3) GT entries (shapes + boxes); keep 1:1 with im_files for stable cache hashes ---
     gt_entries = load_gt_label_entries(im_files, nc_gt=nc_gt, root=root)
@@ -2067,9 +2059,8 @@ def apply_pseudo_labels_to_subset(
 def maybe_build_pseudo_labels(trainer) -> None:
     """Entry point from WeDetectTrainer: apply pseudo labels to train subsets.
 
-    Each subset is gated by ``resolve_pseudo_cfg`` (dataset YAML preferred over
-    global train args). Safe under DDP when the caller wraps with
-    ``torch_distributed_zero_first`` so rank-0 materializes files first.
+    Each subset is gated by ``resolve_pseudo_cfg`` (dataset YAML preferred over global train args). Safe under DDP when
+    the caller wraps with ``torch_distributed_zero_first`` so rank-0 materializes files first.
     """
     args = trainer.args
     device = getattr(trainer, "device", None)

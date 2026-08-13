@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ultralytics.data import YOLOConcatDataset, build_grounding, build_yolo_dataset
 from ultralytics.data.dataset import attach_shared_neg_queue, build_global_class_texts
@@ -37,16 +37,14 @@ def on_pretrain_routine_end(trainer) -> None:
 class WeDetectTrainer(DetectionTrainer):
     """Trainer for WeDetect open-vocabulary detection models.
 
-    Extends DetectionTrainer to support training WeDetect models which use
-    ConvNeXt backbone and XLM-RoBERTa text encoder.  Handles text embedding
-    generation and caching to accelerate training with multi-modal data.
+    Extends DetectionTrainer to support training WeDetect models which use ConvNeXt backbone and XLM-RoBERTa text
+    encoder. Handles text embedding generation and caching to accelerate training with multi-modal data.
 
     Two fine-tuning modes are supported via configuration:
     - **Open-vocabulary (OV)**: Text encoder is kept online and updated with a
-      reduced learning rate (``text_lr_mult``).  Set ``freeze_text_encoder=False``.
+    reduced learning rate (``text_lr_mult``). Set ``freeze_text_encoder=False``.
     - **Close-set (CS)**: Text encoder is discarded; pre-computed class embeddings
-      are cached and injected into every batch.  Set ``freeze_text_encoder=True``
-      or ``close_set=True``.
+    are cached and injected into every batch. Set ``freeze_text_encoder=True`` or ``close_set=True``.
 
     WeDetect-specific config keys (set via YAML or CLI overrides):
         freeze_text_encoder (bool): Freeze the text encoder so it does not
@@ -224,16 +222,16 @@ class WeDetectTrainer(DetectionTrainer):
                 else:
                     g[0][fullname] = param
 
-        import torch.optim as optim
+        from torch import optim
 
         optimizers = {"Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "SGD", "MuSGD", "auto"}
         name = {x.lower(): x for x in optimizers}.get(name.lower())
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
-            optim_args = dict(lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            optim_args = {"lr": lr, "betas": (momentum, 0.999), "weight_decay": 0.0}
         elif name == "RMSProp":
-            optim_args = dict(lr=lr, momentum=momentum)
+            optim_args = {"lr": lr, "momentum": momentum}
         elif name == "SGD" or name == "MuSGD":
-            optim_args = dict(lr=lr, momentum=momentum, nesterov=True)
+            optim_args = {"lr": lr, "momentum": momentum, "nesterov": True}
         else:
             raise NotImplementedError(f"Optimizer '{name}' not found in {optimizers}.")
 
@@ -245,18 +243,28 @@ class WeDetectTrainer(DetectionTrainer):
         param_groups = [g[0], g[1], g[2]]
         if use_muon:
             num_params[0] = len(g[3])
-            param_groups.append({"params": list(g[3].values()), **optim_args, "weight_decay": decay, "use_muon": True, "param_group": "muon"})
+            param_groups.append(
+                {
+                    "params": list(g[3].values()),
+                    **optim_args,
+                    "weight_decay": decay,
+                    "use_muon": True,
+                    "param_group": "muon",
+                }
+            )
 
         n_text = len(g[4])
         if n_text:
             # Match original WeDetect: lr_mult only; keep global weight_decay on text params
-            param_groups.append({
-                "params": list(g[4].values()),
-                "lr": lr * text_lr_mult,
-                "weight_decay": decay,
-                "param_group": "text_encoder",
-                **{k: v for k, v in optim_args.items() if k != "lr" and k != "weight_decay"},
-            })
+            param_groups.append(
+                {
+                    "params": list(g[4].values()),
+                    "lr": lr * text_lr_mult,
+                    "weight_decay": decay,
+                    "param_group": "text_encoder",
+                    **{k: v for k, v in optim_args.items() if k != "lr" and k != "weight_decay"},
+                }
+            )
 
         optimizer = getattr(optim, name, partial(MuSGD, muon=0.2, sgd=1.0))(params=param_groups)
 
@@ -347,7 +355,7 @@ class WeDetectTrainer(DetectionTrainer):
         assert data["val"], "validation dataset not found"
         assert data["train"], "train dataset not found"
 
-        for s in {"train", "val"}:
+        for s in ("train", "val"):
             if s == "train":
                 final_data[s] = [d["train"] for d in data[s]]
             else:
@@ -358,7 +366,7 @@ class WeDetectTrainer(DetectionTrainer):
             grounding_data = grounding_data if isinstance(grounding_data, list) else [grounding_data]
             for g in grounding_data:
                 assert isinstance(g, dict), f"Grounding data should be provided in dict format, but got {type(g)}"
-                for k in {"img_path", "json_file"}:
+                for k in ("img_path", "json_file"):
                     path = Path(g[k])
                     if not path.exists() and not path.is_absolute():
                         g[k] = str((DATASETS_DIR / g[k]).resolve())
@@ -444,7 +452,7 @@ class WeDetectTrainer(DetectionTrainer):
         LOGGER.info(
             f"{colorstr('WeDetect:')} mixed data config with {len(data['train'])} YOLO "
             f"+ {len(final_data['train']) - len(data['train'])} grounding train subsets, "
-            f"{n_val} val set(s) (fitness weights={['%.3f' % x for x in w]}{dyn})"
+            f"{n_val} val set(s) (fitness weights={[f'{x:.3f}' for x in w]}{dyn})"
         )
         # Pseudo-label hook runs in get_dataset() after this returns
         return final_data
@@ -520,9 +528,7 @@ class WeDetectTrainer(DetectionTrainer):
 
         self._dynamic_val_weights = new_w
         tags = [self._val_metric_tag(v, i) for i, v in enumerate(val_vdata)]
-        detail = ", ".join(
-            f"{t}=w{w:.3f}(mAP={m:.4f},tgt={tg:.4f})" for t, w, m, tg in zip(tags, new_w, maps, targets)
-        )
+        detail = ", ".join(f"{t}=w{w:.3f}(mAP={m:.4f},tgt={tg:.4f})" for t, w, m, tg in zip(tags, new_w, maps, targets))
         LOGGER.info(
             f"{colorstr('WeDetect val:')} dynamic fitness weights updated "
             f"(avg_mAP={avg:.4f}, lvis={'yes' if any(is_lvis) else 'no'}) → {detail}"
@@ -706,9 +712,7 @@ class WeDetectTrainer(DetectionTrainer):
         # Mixed train: img_path is a list of YOLO paths and/or grounding dicts
         if mode == "train" and isinstance(img_path, list) and self.training_data is not None:
             datasets = [
-                build_yolo_dataset(
-                    self.args, im_path, batch, self.training_data[im_path], stride=gs, multi_modal=True
-                )
+                build_yolo_dataset(self.args, im_path, batch, self.training_data[im_path], stride=gs, multi_modal=True)
                 if isinstance(im_path, str)
                 else build_grounding(
                     self.args,
@@ -866,7 +870,7 @@ class WeDetectTrainer(DetectionTrainer):
                 "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
                 "scaler": self.scaler.state_dict(),
                 "train_args": vars(self.args),
-                "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
+                "train_metrics": {**self.metrics, "fitness": self.fitness},
                 "train_results": self.read_results_csv(),
                 "text_model_weights": text_weights,
                 "date": datetime.now().isoformat(),
@@ -896,27 +900,24 @@ class WeDetectTrainer(DetectionTrainer):
 class WeDetectTrainerFromScratch(WeDetectTrainer):
     """Trainer for WeDetect models from scratch / large-scale mixed open-set data.
 
-    Mixed-dataset support (``yolo_data`` + ``grounding_data``, global text merge,
-    optional NegQueue, mixed ``final_eval``) lives on :class:`WeDetectTrainer`.
-    This subclass keeps the historical name and only skips label plotting.
+    Mixed-dataset support (``yolo_data`` + ``grounding_data``, global text merge, optional NegQueue, mixed
+    ``final_eval``) lives on :class:`WeDetectTrainer`. This subclass keeps the historical name and only skips label
+    plotting.
     """
 
     def plot_training_labels(self):
         """Skip label plotting for WeDetect open-vocabulary training."""
-        pass
 
 
 class WeDetectUniTrainer(DetectionTrainer):
     """Trainer for WeDetect-Uni models with learnable prompt embeddings.
 
-    Follows the original WeDetect ``SimpleYOLOWorldDetector`` pattern:
-    learnable ``embeddings`` are used as text features directly, passed to
-    the detection head's ``BNContrastiveHead`` for contrastive scoring.
-    No text encoder is needed during training or inference.
+    Follows the original WeDetect ``SimpleYOLOWorldDetector`` pattern: learnable ``embeddings`` are used as text
+    features directly, passed to the detection head's ``BNContrastiveHead`` for contrastive scoring. No text encoder is
+    needed during training or inference.
 
-    When pretrained weights are provided, the embeddings are initialised
-    from the text encoder (XLM-RoBERTa) and the entire detector is
-    frozen except for the embeddings (and optional MLP adapter).
+    When pretrained weights are provided, the embeddings are initialized from the text encoder (XLM-RoBERTa) and the
+    entire detector is frozen except for the embeddings (and optional MLP adapter).
 
     This is suitable for:
     - Fine-tuning WeDetect-Uni on a target domain
@@ -934,10 +935,10 @@ class WeDetectUniTrainer(DetectionTrainer):
         super().__init__(cfg, overrides, _callbacks)
 
     def get_model(self, cfg=None, weights=None, verbose: bool = True):
-        """Return WeDetectUniModel initialised with learnable prompt embeddings.
+        """Return WeDetectUniModel initialized with learnable prompt embeddings.
 
         Follows the original WeDetect ``SimpleYOLOWorldDetector``: embeddings
-        are initialised from XLM-RoBERTa text encoder output and the rest of
+        are initialized from XLM-RoBERTa text encoder output and the rest of
         the detector is frozen.  The head uses ``BNContrastiveHead`` for
         contrastive scoring (no ``fuse`` operation).
 
@@ -947,7 +948,7 @@ class WeDetectUniTrainer(DetectionTrainer):
             verbose: Whether to display model info.
 
         Returns:
-            (WeDetectUniModel): Initialised model.
+            (WeDetectUniModel): Initialized model.
         """
         nc = self.data["nc"]
         if isinstance(cfg, dict):
@@ -1005,4 +1006,3 @@ class WeDetectUniTrainer(DetectionTrainer):
 
     def set_text_embeddings(self, datasets, batch: int):
         """No-op override for prompt-free training that does not require text embeddings."""
-        pass

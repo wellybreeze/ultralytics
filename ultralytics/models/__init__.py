@@ -1,13 +1,26 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from .dfine import DFINE
+from .define import DEFINE
 from .fastsam import FastSAM
 from .llm import LLM
 from .nas import NAS
 from .rtdetr import RTDETR
 from .yolo import YOLO, YOLOE, WeDetect, WeDetectUni, YOLOWorld
 
-__all__ = "LLM", "NAS", "RTDETR", "SAM", "YOLO", "YOLOE", "FastSAM", "YOLOWorld", "WeDetect", "WeDetectUni", "DFINE", "RFDETR" # allow simpler import
+__all__ = (
+    "DEFINE",
+    "LLM",
+    "NAS",
+    "RFDETR",
+    "RTDETR",
+    "SAM",
+    "YOLO",
+    "YOLOE",
+    "FastSAM",
+    "WeDetect",
+    "WeDetectUni",
+    "YOLOWorld",
+)  # allow simpler import
 
 
 def __getattr__(name):

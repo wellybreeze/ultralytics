@@ -1,5 +1,5 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-"""WeDetect dual-tower ONNX inference with custom open-vocabulary prompts.
+r"""WeDetect dual-tower ONNX inference with custom open-vocabulary prompts.
 
 Export first (from a WeDetect .pt checkpoint)::
 
@@ -34,7 +34,7 @@ def letterbox_rgb(im_bgr: np.ndarray, imgsz: int = 640, pad_val: int = 114):
     """Letterbox BGR image to square RGB float32 CHW /255."""
     h0, w0 = im_bgr.shape[:2]
     r = min(imgsz / h0, imgsz / w0)
-    nh, nw = int(round(h0 * r)), int(round(w0 * r))
+    nh, nw = round(h0 * r), round(w0 * r)
     im = cv2.resize(im_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
     top = (imgsz - nh) // 2
     left = (imgsz - nw) // 2

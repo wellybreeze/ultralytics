@@ -13,8 +13,8 @@ from typing import Any
 
 import torch
 import torch.distributed
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from ultralytics.nn.modules.dfine_utils import bbox2distance
 from ultralytics.utils.metrics import bbox_iou
@@ -36,8 +36,8 @@ def _get_world_size() -> int:
 class DFINEDetectionLoss(nn.Module):
     """D-FINE criterion ported for Ultralytics RT-DETR-style batch targets.
 
-    Computes Varifocal (VFL), L1 / GIoU box, Fine-Grained Localization (FGL), and Decoupled
-    Distillation Focal (DDF) losses with GO-LSD matching union across decoder layers.
+    Computes Varifocal (VFL), L1 / GIoU box, Fine-Grained Localization (FGL), and Decoupled Distillation Focal (DDF)
+    losses with GO-LSD matching union across decoder layers.
 
     Args:
         nc (int): Number of classes.
@@ -152,9 +152,7 @@ class DFINEDetectionLoss(nn.Module):
 
         src_logits = outputs["pred_logits"]
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(
-            src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
-        )
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
         target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
 
@@ -165,9 +163,7 @@ class DFINEDetectionLoss(nn.Module):
         pred_score = F.sigmoid(src_logits).detach()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
 
-        loss = F.binary_cross_entropy_with_logits(
-            src_logits, target_score, weight=weight, reduction="none"
-        )
+        loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction="none")
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {"loss_vfl": loss}
 
@@ -230,9 +226,7 @@ class DFINEDetectionLoss(nn.Module):
                     outputs["up"],
                 )
 
-        target_corners, weight_right, weight_left = (
-            self.fgl_targets_dn if "is_dn" in outputs else self.fgl_targets
-        )
+        target_corners, weight_right, weight_left = self.fgl_targets_dn if "is_dn" in outputs else self.fgl_targets
 
         ious = bbox_iou(outputs["pred_boxes"][idx], target_boxes, xywh=True).squeeze(-1)
         weight_targets = ious.unsqueeze(-1).repeat(1, 1, 4).reshape(-1).detach()
@@ -258,12 +252,8 @@ class DFINEDetectionLoss(nn.Module):
                 mask[idx] = True
                 mask = mask.unsqueeze(-1).repeat(1, 1, 4).reshape(-1)
 
-                weight_targets_local[idx] = ious.reshape_as(weight_targets_local[idx]).to(
-                    weight_targets_local.dtype
-                )
-                weight_targets_local = (
-                    weight_targets_local.unsqueeze(-1).repeat(1, 1, 4).reshape(-1).detach()
-                )
+                weight_targets_local[idx] = ious.reshape_as(weight_targets_local[idx]).to(weight_targets_local.dtype)
+                weight_targets_local = weight_targets_local.unsqueeze(-1).repeat(1, 1, 4).reshape(-1).detach()
 
                 loss_match_local = (
                     weight_targets_local
@@ -283,9 +273,9 @@ class DFINEDetectionLoss(nn.Module):
                     )
                 loss_match_local1 = loss_match_local[mask].mean() if mask.any() else 0
                 loss_match_local2 = loss_match_local[~mask].mean() if (~mask).any() else 0
-                losses["loss_ddf"] = (
-                    loss_match_local1 * self.num_pos + loss_match_local2 * self.num_neg
-                ) / (self.num_pos + self.num_neg)
+                losses["loss_ddf"] = (loss_match_local1 * self.num_pos + loss_match_local2 * self.num_neg) / (
+                    self.num_pos + self.num_neg
+                )
 
         return losses
 
@@ -348,15 +338,17 @@ class DFINEDetectionLoss(nn.Module):
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
-    def forward(self, outputs: dict[str, torch.Tensor], batch: dict[str, Any], **kwargs: Any) -> dict[str, torch.Tensor]:
+    def forward(
+        self, outputs: dict[str, torch.Tensor], batch: dict[str, Any], **kwargs: Any
+    ) -> dict[str, torch.Tensor]:
         """Compute D-FINE losses from decoder outputs and Ultralytics batch targets.
 
         Args:
-            outputs (dict[str, torch.Tensor]): DFINEDecoder train dict with ``pred_logits``,
-                ``pred_boxes``, ``pred_corners``, ``ref_points``, ``up``, ``reg_scale``, and
-                optional ``aux_outputs``, ``enc_aux_outputs``, ``pre_outputs``, ``dn_*``, meta.
-            batch (dict[str, Any]): Ultralytics targets with ``cls``, ``bboxes``, ``gt_groups``
-                (and optionally ``batch_idx``).
+            outputs (dict[str, torch.Tensor]): DFINEDecoder train dict with ``pred_logits``, ``pred_boxes``,
+                ``pred_corners``, ``ref_points``, ``up``, ``reg_scale``, and optional ``aux_outputs``,
+                ``enc_aux_outputs``, ``pre_outputs``, ``dn_*``, meta.
+            batch (dict[str, Any]): Ultralytics targets with ``cls``, ``bboxes``, ``gt_groups`` (and optionally
+                ``batch_idx``).
 
         Returns:
             (dict[str, torch.Tensor]): Weighted loss dictionary (main + aux / enc / dn terms).
@@ -382,9 +374,7 @@ class DFINEDetectionLoss(nn.Module):
             indices_go = self._get_go_indices(indices, indices_aux_list)
 
             num_boxes_go = sum(len(x[0]) for x in indices_go)
-            num_boxes_go = torch.as_tensor(
-                [num_boxes_go], dtype=torch.float, device=self.device
-            )
+            num_boxes_go = torch.as_tensor([num_boxes_go], dtype=torch.float, device=self.device)
             if _is_dist_avail_and_initialized():
                 torch.distributed.all_reduce(num_boxes_go)
             num_boxes_go = torch.clamp(num_boxes_go / _get_world_size(), min=1).item()
@@ -413,12 +403,8 @@ class DFINEDetectionLoss(nn.Module):
                     indices_in = indices_go if loss in ["boxes", "local"] else cached_indices[i]
                     num_boxes_in = num_boxes_go if loss in ["boxes", "local"] else num_boxes
                     meta = self.get_loss_meta_info(loss, aux_outputs, targets, indices_in)
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, targets, indices_in, num_boxes_in, **meta
-                    )
-                    l_dict = {
-                        k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
-                    }
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_in, num_boxes_in, **meta)
+                    l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f"_aux_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -429,9 +415,7 @@ class DFINEDetectionLoss(nn.Module):
                 num_boxes_in = num_boxes_go if loss in ["boxes", "local"] else num_boxes
                 meta = self.get_loss_meta_info(loss, aux_outputs, targets, indices_in)
                 l_dict = self.get_loss(loss, aux_outputs, targets, indices_in, num_boxes_in, **meta)
-                l_dict = {
-                    k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
-                }
+                l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                 l_dict = {k + "_pre": v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
@@ -452,12 +436,8 @@ class DFINEDetectionLoss(nn.Module):
                     indices_in = indices_go if loss == "boxes" else cached_indices_enc[i]
                     num_boxes_in = num_boxes_go if loss == "boxes" else num_boxes
                     meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, indices_in)
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, enc_targets, indices_in, num_boxes_in, **meta
-                    )
-                    l_dict = {
-                        k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
-                    }
+                    l_dict = self.get_loss(loss, aux_outputs, enc_targets, indices_in, num_boxes_in, **meta)
+                    l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f"_enc_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -478,12 +458,8 @@ class DFINEDetectionLoss(nn.Module):
                 aux_outputs["up"], aux_outputs["reg_scale"] = outputs["up"], outputs["reg_scale"]
                 for loss in self.losses:
                     meta = self.get_loss_meta_info(loss, aux_outputs, targets, indices_dn)
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, targets, indices_dn, dn_num_boxes, **meta
-                    )
-                    l_dict = {
-                        k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
-                    }
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_dn, dn_num_boxes, **meta)
+                    l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f"_dn_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -491,12 +467,8 @@ class DFINEDetectionLoss(nn.Module):
                 aux_outputs = outputs["dn_pre_outputs"]
                 for loss in self.losses:
                     meta = self.get_loss_meta_info(loss, aux_outputs, targets, indices_dn)
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, targets, indices_dn, dn_num_boxes, **meta
-                    )
-                    l_dict = {
-                        k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
-                    }
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_dn, dn_num_boxes, **meta)
+                    l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + "_dn_pre": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -568,9 +540,9 @@ class DFINEDetectionLoss(nn.Module):
         dis_left = label.long()
         dis_right = dis_left + 1
 
-        loss = F.cross_entropy(pred, dis_left, reduction="none") * weight_left.reshape(
-            -1
-        ) + F.cross_entropy(pred, dis_right, reduction="none") * weight_right.reshape(-1)
+        loss = F.cross_entropy(pred, dis_left, reduction="none") * weight_left.reshape(-1) + F.cross_entropy(
+            pred, dis_right, reduction="none"
+        ) * weight_right.reshape(-1)
 
         if weight is not None:
             weight = weight.float()

@@ -17,14 +17,14 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 ## 架构
 
-| 部件 | 实现 |
-| ---- | ---- |
-| 视觉骨干 | ConvNeXt（`tiny` / `base` / `large` / `xlarge`） |
-| Neck | CSPRepBiFPAN |
-| 检测头 | `WeDetectDetect`（区域–文本对比，embed=768） |
-| 文本塔 | XLM-RoBERTa base（`xlm-roberta:base`） |
-| 模型类 | `WeDetectModel`（程序组装，不用 YOLO 式 `parse_model` 层表） |
-| 训练 / 验证 / 预测 | `WeDetectTrainer`、`WeDetectValidator`、`WeDetectPredictor` |
+| 部件               | 实现                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| 视觉骨干           | ConvNeXt（`tiny` / `base` / `large` / `xlarge`）             |
+| Neck               | CSPRepBiFPAN                                                 |
+| 检测头             | `WeDetectDetect`（区域–文本对比，embed=768）                 |
+| 文本塔             | XLM-RoBERTa base（`xlm-roberta:base`）                       |
+| 模型类             | `WeDetectModel`（程序组装，不用 YOLO 式 `parse_model` 层表） |
+| 训练 / 验证 / 预测 | `WeDetectTrainer`、`WeDetectValidator`、`WeDetectPredictor`  |
 
 结构 YAML 在 `ultralytics/cfg/models/wedetect/`。无在线 LM 的 **WeDetect-Uni** 见 `wedetect-uni-*.yaml`。
 
@@ -67,11 +67,11 @@ model.train(
 
 混数 `val.yolo_data` 每个 epoch 按子集切换 `nc` / `names` / `class_texts` 并重建 dataloader。
 
-| 列 | 含义 |
-| -- | ---- |
-| 无前缀 `metrics/mAP50-95(B)` | **第一个** val 集的拷贝（给默认曲线图） |
-| `<数据集>/metrics/...` | 该子集自己的指标 |
-| 无前缀 `fitness` | 各集 mAP50-95 **加权平均**，决定 `best.pt` |
+| 列                           | 含义                                       |
+| ---------------------------- | ------------------------------------------ |
+| 无前缀 `metrics/mAP50-95(B)` | **第一个** val 集的拷贝（给默认曲线图）    |
+| `<数据集>/metrics/...`       | 该子集自己的指标                           |
+| 无前缀 `fitness`             | 各集 mAP50-95 **加权平均**，决定 `best.pt` |
 
 `val_fitness_dynamic=true` 时：epoch 1 用 YAML `val_fitness_weights`；之后按上一轮 mAP 调权。含 LVIS 时，LVIS 目标 = `val_fitness_lvis_target_mult ×` 客户子集均值（默认 2.0）。
 
@@ -86,17 +86,17 @@ model.train(
 
 ## 配置文件
 
-| 文件 | 用途 |
-| ---- | ---- |
-| `ultralytics/cfg/wedetect_finetune.yaml` | OV 微调（必须用它，避免落到 `default.yaml` 的冻结文本塔） |
-| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml` | OV + mask refine |
-| `ultralytics/cfg/wedetect_scratch.yaml` | 从零混数 |
-| `ultralytics/cfg/datasets/wedetect_mixed.yaml` | 混数模板 |
-| `ultralytics/cfg/datasets/wedetect_mixed_customer.yaml` | 客户多任务 + LVIS 示例 |
+| 文件                                                    | 用途                                                      |
+| ------------------------------------------------------- | --------------------------------------------------------- |
+| `ultralytics/cfg/wedetect_finetune.yaml`                | OV 微调（必须用它，避免落到 `default.yaml` 的冻结文本塔） |
+| `ultralytics/cfg/wedetect_finetune_mask_refine.yaml`    | OV + mask refine                                          |
+| `ultralytics/cfg/wedetect_scratch.yaml`                 | 从零混数                                                  |
+| `ultralytics/cfg/datasets/wedetect_mixed.yaml`          | 混数模板                                                  |
+| `ultralytics/cfg/datasets/wedetect_mixed_customer.yaml` | 客户多任务 + LVIS 示例                                    |
 
 ## 支持的任务与模式
 
-| 模型 | 配置 / 权重 | 任务 | 训练 | 验证 | 预测 | 导出 |
-| ---- | ----------- | ---- | ---- | ---- | ---- | ---- |
-| WeDetect | `wedetect-*.yaml` / `wedetect_*.pt` | 开放词汇检测 | ✅ | ✅ | ✅ | ✅ dual/whole |
-| WeDetect-Uni | `wedetect-uni-*.yaml` | 可学习 prompt 检测 | ✅ | ✅ | ✅ | ✅ |
+| 模型         | 配置 / 权重                         | 任务               | 训练 | 验证 | 预测 | 导出          |
+| ------------ | ----------------------------------- | ------------------ | ---- | ---- | ---- | ------------- |
+| WeDetect     | `wedetect-*.yaml` / `wedetect_*.pt` | 开放词汇检测       | ✅   | ✅   | ✅   | ✅ dual/whole |
+| WeDetect-Uni | `wedetect-uni-*.yaml`               | 可学习 prompt 检测 | ✅   | ✅   | ✅   | ✅            |

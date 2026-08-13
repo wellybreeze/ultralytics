@@ -102,7 +102,9 @@ def _as_pred_dict(preds) -> dict:
 
 
 @torch.inference_mode()
-def decode_dets(module, batch: torch.Tensor, orig_hw: tuple[int, int], conf: float, max_det: int, model_config) -> DetOut:
+def decode_dets(
+    module, batch: torch.Tensor, orig_hw: tuple[int, int], conf: float, max_det: int, model_config
+) -> DetOut:
     """Forward LWDETR and decode with official PostProcess (shared by both sides)."""
     from rfdetr.models.postprocess import PostProcess
 
@@ -188,7 +190,7 @@ def run_case(
     try:
         ultra_mod, ultra_cfg, imgsz = load_ultralytics(weight, device)
         off_mod, off_cfg = load_official(variant, weight, device)
-    except Exception as exc:  # noqa: BLE001 — report and continue matrix
+    except Exception as exc:
         return False, f"FAIL  {tag}: load error: {exc}"
 
     bgr = cv2.imread(str(image))
@@ -201,9 +203,7 @@ def run_case(
     official = decode_dets(off_mod, batch, orig_hw, conf, max_det, off_cfg)
     errs = compare_dets(ultra, official, atol=atol, rtol=rtol)
     if errs:
-        return False, (
-            f"FAIL  {tag} imgsz={imgsz} N={ultra.cls.numel()}/{official.cls.numel()}: " + "; ".join(errs)
-        )
+        return False, (f"FAIL  {tag} imgsz={imgsz} N={ultra.cls.numel()}/{official.cls.numel()}: " + "; ".join(errs))
     return True, f"PASS  {tag} imgsz={imgsz} N={ultra.cls.numel()} (bbox/conf/cls identical)"
 
 

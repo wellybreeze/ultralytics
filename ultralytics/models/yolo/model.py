@@ -93,9 +93,9 @@ class YOLO(Model):
                 self.__class__ = type(new_instance)
                 self.__dict__ = new_instance.__dict__
             elif hasattr(self.model, "model") and "DFINEDecoder" in self.model.model[-1]._get_name():
-                from ultralytics import DFINE
+                from ultralytics import DEFINE
 
-                new_instance = DFINE(self)
+                new_instance = DEFINE(self)
                 self.__class__ = type(new_instance)
                 self.__dict__ = new_instance.__dict__
 
@@ -567,13 +567,12 @@ class YOLOE(Model):
 class WeDetect(Model):
     """WeDetect open-vocabulary detection model with ConvNeXt + XLM-RoBERTa.
 
-    WeDetect uses a ConvNeXt vision backbone and XLM-RoBERTa multilingual text
-    encoder for open-vocabulary object detection.  It supports multilingual
-    prompts out of the box.
+    WeDetect uses a ConvNeXt vision backbone and XLM-RoBERTa multilingual text encoder for open-vocabulary object
+    detection. It supports multilingual prompts out of the box.
 
     Export (dynamic open-vocabulary, aligned with WeDetect/deploy)::
 
-        model.export(format="onnx", export_mode="dual")   # *_vision.onnx + *_language.onnx
+        model.export(format="onnx", export_mode="dual")  # *_vision.onnx + *_language.onnx
         model.export(format="engine", export_mode="dual", device=0)  # raw dual engines (Python NMS)
         model.export(format="engine", export_mode="dual", nms=True, max_det=300, device=0)  # GPU NMS
         model.export(format="onnx", export_mode="whole")  # *_whole.onnx (example-script inference only)
@@ -599,8 +598,8 @@ class WeDetect(Model):
         """Initialize WeDetect model.
 
         Args:
-            model (str | Path): Path to the model file. Supports ``*.pt``, ``*_vision.onnx``,
-                ``*_vision.engine``, and ``*.yaml`` configs.
+            model (str | Path): Path to the model file. Supports ``*.pt``, ``*_vision.onnx``, ``*_vision.engine``, and
+                ``*.yaml`` configs.
             verbose (bool): If True, prints additional information during initialization.
         """
         self._prompt_classes: list[str] | None = None
@@ -635,9 +634,7 @@ class WeDetect(Model):
         from ultralytics.utils import ARGV
 
         device = kwargs.get("device", self.overrides.get("device"))
-        need_setup = not self.predictor or (
-            device is not None and str(self.predictor.args.device) != str(device)
-        )
+        need_setup = not self.predictor or (device is not None and str(self.predictor.args.device) != str(device))
         if need_setup and self._prompt_classes is not None:
             is_cli = (ARGV[0].endswith("yolo") or ARGV[0].endswith("ultralytics")) and any(
                 x in ARGV for x in ("predict", "track", "mode=predict", "mode=track")
@@ -669,8 +666,8 @@ class WeDetect(Model):
 class WeDetectUni(Model):
     """WeDetect-Uni unified detection model with learnable prompt embeddings.
 
-    WeDetect-Uni eliminates the need for a text encoder at inference time by using
-    learnable prompt embeddings, enabling faster inference compared to WeDetect.
+    WeDetect-Uni eliminates the need for a text encoder at inference time by using learnable prompt embeddings, enabling
+    faster inference compared to WeDetect.
 
     Attributes:
         model: The loaded WeDetect-Uni model instance.
@@ -686,8 +683,7 @@ class WeDetectUni(Model):
         """Initialize WeDetect-Uni model.
 
         Args:
-            model (str | Path): Path to the model file. Supports *.pt (Ultralytics format)
-                and *.yaml config files.
+            model (str | Path): Path to the model file. Supports *.pt (Ultralytics format) and *.yaml config files.
             verbose (bool): If True, prints additional information during initialization.
         """
         super().__init__(model=model, task="detect", verbose=verbose)

@@ -1081,7 +1081,7 @@ def _save_results_figure(
     """Save a 2-row results curve figure.
 
     Args:
-        series: ``[(label, x, {col: y}), ...]`` overlayed per axis (each series may have its own ``x``).
+        series: ``[(label, x, {col: y}), ...]`` overlaid per axis (each series may have its own ``x``).
         columns: Column keys / titles for each subplot.
         fname: Output PNG path.
         on_plot: Optional callback after save.
@@ -1116,8 +1116,8 @@ def _save_results_figure(
 def plot_mixed_val_results(file: str | Path, on_plot: Callable | None = None) -> list[Path]:
     """Plot WeDetect mixed multi-val metrics from a tagged ``results.csv``.
 
-    Expects columns like ``{tag}/metrics/...`` and ``{tag}/fitness`` (first val also has
-    unprefixed keys for the main ``results.png``). Writes:
+    Expects columns like ``{tag}/metrics/...`` and ``{tag}/fitness`` (first val also has unprefixed keys for the main
+    ``results.png``). Writes:
 
     - ``results_multival.png``: one row of subplots per dataset (not overlaid)
     - ``multival_results.png``: last-epoch fitness bar chart (via ``plot_multitrain_results``)
@@ -1210,8 +1210,8 @@ def plot_results(file: str = "path/to/results.csv", dir: str = "", on_plot: Call
     segmentation, semantic segmentation, pose estimation, and classification. Plots are saved as 'results.png' in
     the directory where the CSV is located.
 
-    When the CSV includes WeDetect mixed multi-val columns (``{tag}/metrics/...``), also writes
-    ``results_multival.png`` and ``multival_results.png``.
+    When the CSV includes WeDetect mixed multi-val columns (``{tag}/metrics/...``), also writes ``results_multival.png``
+    and ``multival_results.png``.
 
     Args:
         file (str, optional): Path to the CSV file containing the training results.

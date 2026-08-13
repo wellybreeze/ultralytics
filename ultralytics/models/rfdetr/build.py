@@ -11,8 +11,8 @@ from ultralytics.utils import LOGGER
 def _require_rfdetr():
     """Import the optional ``rfdetr`` package or raise an install hint.
 
-    Also quiets the package's ``rf-detr`` logger so only Ultralytics ``LOGGER`` output
-    (``WARNING ⚠️ …`` / plain INFO) reaches the console — matching YOLO/NAS session style.
+    Also quiets the package's ``rf-detr`` logger so only Ultralytics ``LOGGER`` output (``WARNING ⚠️ …`` / plain INFO)
+    reaches the console — matching YOLO/NAS session style.
     """
     try:
         import rfdetr  # noqa: F401
@@ -30,10 +30,10 @@ def _require_rfdetr():
 def rfdetr_class_names(num_classes: int, class_names: list[str] | None = None) -> dict[int, str]:
     """Build an Ultralytics ``names`` dict for RF-DETR class indices.
 
-    Published COCO checkpoints emit sparse category IDs (1–90 with gaps), so a contiguous
-    ``{i: f'class{i}'}`` map shows placeholders like ``class6`` instead of ``bus``. Prefer
-    checkpoint-embedded names when present; otherwise use Roboflow's COCO ID→name table when
-    ``num_classes == 90``, padded to a dense ``0..90`` dict so AutoBackend validation accepts it.
+    Published COCO checkpoints emit sparse category IDs (1–90 with gaps), so a contiguous ``{i: f'class{i}'}`` map shows
+    placeholders like ``class6`` instead of ``bus``. Prefer checkpoint-embedded names when present; otherwise use
+    Roboflow's COCO ID→name table when ``num_classes == 90``, padded to a dense ``0..90`` dict so AutoBackend validation
+    accepts it.
 
     Args:
         num_classes (int): Configured foreground class count (RF-DETR COCO default is 90).
@@ -131,11 +131,11 @@ def get_config_class(name: str):
 def sync_rfdetr_model_config(model_config, args):
     """Apply Ultralytics ``default.yaml`` fields onto an RF-DETR ``ModelConfig``.
 
-    Maps values that RF-DETR exposes on the architecture / postprocess config:
-    ``max_det`` → ``num_select``, ``mask_ratio`` → ``mask_downsample_ratio``, ``amp`` → ``amp``.
+    Maps values that RF-DETR exposes on the architecture / postprocess config: ``max_det`` → ``num_select``,
+    ``mask_ratio`` → ``mask_downsample_ratio``, ``amp`` → ``amp``.
 
-    Training loop knobs (epochs, batch, lr0, workers, augmentations, …) stay on Ultralytics
-    ``args`` / ``BaseTrainer`` — they are not copied into Roboflow's unused PTL ``TrainConfig``.
+    Training loop knobs (epochs, batch, lr0, workers, augmentations, …) stay on Ultralytics ``args`` / ``BaseTrainer`` —
+    they are not copied into Roboflow's unused PTL ``TrainConfig``.
 
     Args:
         model_config: RF-DETR pydantic model config.
@@ -170,8 +170,8 @@ def sync_rfdetr_model_config(model_config, args):
 def rfdetr_model_defaults_from_args(args):
     """Build RF-DETR ``ModelDefaults`` with box gains from Ultralytics ``box``.
 
-    YOLO uses a single ``box`` gain for localization; RF-DETR splits L1 (``bbox``) and GIoU.
-    Keep the official ``bbox:giou = 5:2`` ratio while setting ``bbox_loss_coef = box``.
+    YOLO uses a single ``box`` gain for localization; RF-DETR splits L1 (``bbox``) and GIoU. Keep the official
+    ``bbox:giou = 5:2`` ratio while setting ``bbox_loss_coef = box``.
     """
     _require_rfdetr()
     from dataclasses import replace

@@ -2,14 +2,14 @@
 
 from ultralytics.models.yolo import classify, depth, detect, obb, pose, segment, semantic, wedetect, world, yoloe
 
-from .model import YOLO, YOLOE, YOLOWorld, WeDetect, WeDetectUni
+from .model import YOLO, YOLOE, WeDetect, WeDetectUni, YOLOWorld
 
 __all__ = (
     "YOLO",
     "YOLOE",
-    "YOLOWorld",
     "WeDetect",
     "WeDetectUni",
+    "YOLOWorld",
     "classify",
     "depth",
     "detect",

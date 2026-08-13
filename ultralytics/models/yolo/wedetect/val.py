@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from copy import copy
 from pathlib import Path
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ultralytics.data.utils import check_det_dataset, convert_ndjson_to_yolo_if_needed
 from ultralytics.models.yolo.detect import DetectionValidator
@@ -43,9 +42,7 @@ def resolve_wedetect_class_names(data: dict) -> list[str]:
         else:
             prompts.append(str(item).split("/", 1)[0].strip())
     if len(prompts) < nc:
-        LOGGER.warning(
-            f"class_texts length ({len(prompts)}) < nc ({nc}); using data.names for validation prompts"
-        )
+        LOGGER.warning(f"class_texts length ({len(prompts)}) < nc ({nc}); using data.names for validation prompts")
         return names_fallback
     # Allow extra OV vocabulary rows beyond nc (training negatives); val uses first nc
     if len(prompts) > nc:
@@ -56,9 +53,8 @@ def resolve_wedetect_class_names(data: dict) -> list[str]:
 def prepare_wedetect_text_prompts(model, names: list[str], device=None) -> None:
     """Encode class prompts into ``txt_feats`` and align ``names`` / head ``nc``.
 
-    Safe for both training validation (EMA) and standalone ``model.val()`` /
-    ``model.set_classes()`` paths. Does not change user-facing class indices:
-    ``names[i]`` corresponds to prediction class id ``i``.
+    Safe for both training validation (EMA) and standalone ``model.val()`` / ``model.set_classes()`` paths. Does not
+    change user-facing class indices: ``names[i]`` corresponds to prediction class id ``i``.
     """
     if device is not None:
         text_enc = getattr(model, "text_model", None) or getattr(model, "clip_model", None)
@@ -71,9 +67,8 @@ def prepare_wedetect_text_prompts(model, names: list[str], device=None) -> None:
 class WeDetectValidator(DetectionValidator):
     """Validator for WeDetect open-vocabulary detection models.
 
-    Before each validation pass, refreshes text embeddings from the current
-    language tower (critical for OV fine-tuning where the LM is updated) and
-    prefers ``class_texts`` prompts over English ``names`` when available.
+    Before each validation pass, refreshes text embeddings from the current language tower (critical for OV fine-tuning
+    where the LM is updated) and prefers ``class_texts`` prompts over English ``names`` when available.
     """
 
     def __call__(self, trainer=None, model=None):
@@ -149,13 +144,11 @@ class WeDetectValidator(DetectionValidator):
 class WeDetectUniValidator(DetectionValidator):
     """Validator for WeDetect-Uni models with learnable prompt embeddings.
 
-    WeDetect-Uni uses learnable prompt embeddings that correspond to each
-    class in the dataset.  During validation, the model's ``embeddings``
-    are used directly as text features, producing per-class scores via
-    ``BNContrastiveHead``.
+    WeDetect-Uni uses learnable prompt embeddings that correspond to each class in the dataset. During validation, the
+    model's ``embeddings`` are used directly as text features, producing per-class scores via ``BNContrastiveHead``.
 
-    This follows the original WeDetect ``SimpleYOLOWorldDetector`` pattern
-    where ``num_train_classes`` equals the number of dataset categories.
+    This follows the original WeDetect ``SimpleYOLOWorldDetector`` pattern where ``num_train_classes`` equals the number
+    of dataset categories.
     """
 
     def __init__(self, dataloader=None, save_dir=None, pbar=None, args=None, _callbacks=None):

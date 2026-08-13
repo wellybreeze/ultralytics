@@ -1,7 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # D-FINE-L (HGNetv2-B4) — official HybridEncoder + DFINEDecoder
-# Matches D-FINE configs/dfine/dfine_hgnetv2_l_coco.yml + include/dfine_hgnetv2.yml
+# Matches D-FINE configs/define/dfine_hgnetv2_l_coco.yml + include/dfine_hgnetv2.yml
 # Backbone stage channels from HGNetv2 B4 arch_configs
 
 # Parameters

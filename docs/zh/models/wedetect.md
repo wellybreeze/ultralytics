@@ -27,15 +27,15 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 ## 模型库
 
-零样本指标来自论文 Table 1（LVIS val / minival 为 fixed AP）。Ultralytics `.pt` 权重托管于 [Release v1.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v1.0.0)。
+零样本指标来自论文 Table 1（LVIS val / minival 为 fixed AP）。Ultralytics `.pt` 权重托管于 [ModelScope changsu/wedetect-ultralytics](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files)。
 
 ### Zero-shot
 
-|                                                  模型                                                   |    骨干    |                               语言塔                               |  分辨率   | AP<sup>minival</sup> | COCO AP | 参数量 | FPS  |                                 配置                                 |
-| :-----------------------------------------------------------------------------------------------------: | :--------: | :----------------------------------------------------------------: | :-------: | :------------------: | :-----: | :----: | :--: | :------------------------------------------------------------------: |
-|  [WeDetect-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny.pt)  | ConvNeXt-T |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **37.4**       |  44.9   |  33M   | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml)  |
-|  [WeDetect-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base.pt)  | ConvNeXt-B |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **47.3**       |  52.1   |  176M  | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml)  |
-| [WeDetect-Large](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 |       **55.0**       |  54.5   |  490M  | 6.0  | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
+| 模型 | 骨干 | 语言塔 | 分辨率 | AP<sup>minival</sup> | COCO AP | 参数量 | FPS | 配置 |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| [WeDetect-Tiny](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_tiny.pt) | ConvNeXt-T | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **37.4** | 44.9 | 33M | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml) |
+| [WeDetect-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt) | ConvNeXt-B | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **47.3** | 52.1 | 176M | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml) |
+| [WeDetect-Large](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 | **55.0** | 54.5 | 490M | 6.0 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
 
 <details>
 <summary><strong>分项指标（LVIS / COCO / ODInW）</strong></summary>
@@ -52,28 +52,27 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 推理不走在线 LM，使用可学习 prompt embedding（更快，不能按 `set_classes` 任意换开放词汇提示）。
 
-|                                                      模型                                                       |                      语言塔（仅训练初始化）                      |                                   配置                                   |
-| :-------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------: | :----------------------------------------------------------------------: |
-|  [WeDetect-Uni-Tiny](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_tiny_uni.pt)  | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-tiny.yaml)  |
-|  [WeDetect-Uni-Base](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base_uni.pt)  | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml)  |
-| [WeDetect-Uni-Large](https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_large_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-large.yaml) |
+| 模型 | 语言塔（仅训练初始化） | 配置 |
+| :---: | :---: | :---: |
+| [WeDetect-Uni-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml) |
+| [WeDetect-Uni-Large](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_large_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-large.yaml) |
 
 **注意：**
 
 - **AP<sup>minival</sup>** 是 LVIS minival 的 fixed AP（论文 Table 1 主指标）。模型名链到对应 Ultralytics `.pt`。
 - **FPS** 在 COCO 上测得（`batch_size=1`，见论文表格说明）。上表 WeDetect 数字为黑色，表示该零样本评测**未把 COCO 纳入训练**。
 - Large 评测分辨率为 **1280×1280**；Tiny / Base 为 **640×640**。
-- 结构 YAML 另有 `wedetect-xlarge.yaml`（语言塔为 [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large)），当前 [Release v1.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v1.0.0) 未附对应 `.pt`。
+- 结构 YAML 另有 `wedetect-xlarge.yaml`（语言塔为 [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large)），当前 [ModelScope 仓库](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files) 未附对应 `.pt`。
 
 ### 语言塔
 
-语言塔把类别提示词编成 768 维向量，再与检测头做对比。YAML 的 `text_model` 决定结构；[Release v1.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v1.0.0) 的 `.pt` 通过顶层 `text_model_weights` 载入 WeDetect 训练过的编码器与投影头。分词器 / `config.json` 仍来自 Hugging Face（或本地镜像），**不是**检测权重的一部分。
+语言塔把类别提示词编成 768 维向量，再与检测头做对比。YAML 的 `text_model` 决定结构；[ModelScope](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files) 的 `.pt` 通过顶层 `text_model_weights` 载入 WeDetect 训练过的编码器与投影头。分词器 / `config.json` 仍来自 Hugging Face（或本地镜像），**不是**检测权重的一部分。
 
 |          WeDetect          |  YAML `text_model`  |      语言塔       | 隐层 → 投影 |                       用途                       |                                        链接                                         |
 | :------------------------: | :-----------------: | :---------------: | :---------: | :----------------------------------------------: | :---------------------------------------------------------------------------------: |
 |        Tiny / Base         | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  |                  推理 + OV 微调                  |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
 |       Large / XLarge       | `xlm-roberta:large` | XLM-RoBERTa-large | 1024 → 768  |                  推理 + OV 微调                  | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) |
-| Uni（tiny / base / large） | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  | **仅训练**时初始化可学习 prompt；推理不再加载 LM |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
+|     Uni（base / large）      | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  | **仅训练**时初始化可学习 prompt；推理不再加载 LM |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
 
 XLM-RoBERTa 在约 100 种语言的 CommonCrawl 上预训练（论文：[Unsupervised Cross-lingual Representation Learning at Scale](https://arxiv.org/abs/1911.02116)；文档：[Transformers · XLM-RoBERTa](https://huggingface.co/docs/transformers/model_doc/xlm-roberta)），因此中文 / 多语 `class_texts` 可直接使用。Large 文本塔隐层为 1024，经线性头投到 768，与 `WeDetectDetect` 的 `embed` 对齐。
 
@@ -92,8 +91,8 @@ XLM-RoBERTa 在约 100 种语言的 CommonCrawl 上预训练（论文：[Unsuper
 ```python
 from ultralytics import WeDetect
 
-# 从 Release v1.0.0 加载 Ultralytics 预训练权重（也可传本地路径或 YAML）
-model = WeDetect("https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base.pt")
+# 从 ModelScope 加载 Ultralytics 预训练权重（也可传本地路径或 YAML）
+model = WeDetect("https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt")
 # model = WeDetect("wedetect-base.yaml")  # 随机初始化
 
 # 显示模型信息（可选）
@@ -123,7 +122,7 @@ path = model.export(format="onnx", export_mode="dual")
 
 ```bash
 # 下载权重后训练 / 预测（文件名含 "wedetect" 时自动选择 WeDetect）
-wget https://github.com/wellybreeze/ultralytics/releases/download/v1.0.0/wedetect_base.pt
+wget https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt
 yolo cfg=ultralytics/cfg/wedetect_finetune.yaml detect train model=wedetect_base.pt \
   data=ultralytics/cfg/datasets/wedetect_coco.yaml epochs=12 imgsz=640
 yolo predict model=wedetect_base.pt source=path/to/bus.jpg
@@ -246,7 +245,7 @@ m.predict("path/to/bus.jpg")
 
 ### `.pt` 权重从哪里获取？
 
-检测权重从 [Release v1.0.0](https://github.com/wellybreeze/ultralytics/releases/tag/v1.0.0) 下载，或见上方[模型库](#模型库)表格。语言塔分词器 / 结构见 [XLM-RoBERTa-base](https://huggingface.co/FacebookAI/xlm-roberta-base) 与 [XLM-RoBERTa-large](https://huggingface.co/FacebookAI/xlm-roberta-large)（配对关系见[语言塔](#语言塔)）。`.pt` 为 Ultralytics 格式，内含微调后的 `text_model_weights`。
+检测权重从 [ModelScope changsu/wedetect-ultralytics](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files) 下载，或见上方[模型库](#模型库)表格。语言塔分词器 / 结构见 [XLM-RoBERTa-base](https://huggingface.co/FacebookAI/xlm-roberta-base) 与 [XLM-RoBERTa-large](https://huggingface.co/FacebookAI/xlm-roberta-large)（配对关系见[语言塔](#语言塔)）。`.pt` 为 Ultralytics 格式，内含微调后的 `text_model_weights`。
 
 ### 能否在自定义 YOLO 数据集上训练？
 

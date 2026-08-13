@@ -52,7 +52,15 @@ pip install transformers sentencepiece onnx onnxruntime
 
 ### 2.2 预训练权重
 
-将官方权重放到仓库根目录 `pretrained_weights/`，例如：
+将官方权重放到仓库根目录 `pretrained_weights/`。检测权重从 [ModelScope changsu/wedetect-ultralytics](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files) 下载，例如：
+
+```bash
+mkdir -p pretrained_weights
+wget https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt \
+  -O pretrained_weights/wedetect_base.pt
+```
+
+本地路径示例：
 
 | 文件                                   | 说明                          |
 | -------------------------------------- | ----------------------------- |

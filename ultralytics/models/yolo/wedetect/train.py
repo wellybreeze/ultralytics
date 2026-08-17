@@ -328,6 +328,21 @@ class WeDetectTrainer(DetectionTrainer):
         tag = path.name.strip() or f"val{index}"
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)
 
+    def _bind_validator_save_dir(self, tag: str, root: Path | None = None, mkdir: bool | None = None) -> None:
+        """Point validator plots at ``<save_dir>/<tag>/``.
+
+        ``BaseValidator`` only writes confusion/Box/val-batch on the last epoch (or early-stop).
+        Do not mkdir on earlier epochs: ``validator.args.plots`` is still True before that gate.
+        """
+        d = Path(root or self.save_dir) / tag
+        if mkdir is None:
+            last = int(getattr(self, "epoch", -1)) >= int(getattr(self, "epochs", 1)) - 1
+            possible = bool(getattr(getattr(self, "stopper", None), "possible_stop", False))
+            mkdir = bool(self.validator.args.save_json) or (bool(self.args.plots) and (last or possible))
+        if mkdir:
+            d.mkdir(parents=True, exist_ok=True)
+        self.validator.save_dir = d
+
     def _get_mixed_dataset(self, data_yaml: dict) -> dict:
         """Process mixed data config with ``yolo_data`` + optional ``grounding_data``.
 
@@ -563,6 +578,7 @@ class WeDetectTrainer(DetectionTrainer):
         saved = {k: self.data.get(k) for k in primary_keys}
         saved_loader = self.validator.dataloader
         saved_test_loader = self.test_loader
+        saved_save_dir = self.validator.save_dir
 
         metrics_all: dict[str, float] = {}
         fitnesses: list[float] = []
@@ -584,6 +600,8 @@ class WeDetectTrainer(DetectionTrainer):
                 self.test_loader = loader
 
                 tag = self._val_metric_tag(vdata, i)
+                self.validator.args.plots = self.args.plots  # BaseValidator &= last-epoch; reset per val set
+                self._bind_validator_save_dir(tag, saved_save_dir)
                 LOGGER.info(f"{colorstr('WeDetect val:')} [{i + 1}/{len(val_items)}] {tag} (nc={vdata['nc']})")
                 metrics = self.validator(self)
                 if metrics is None:  # non-zero DDP ranks
@@ -612,6 +630,7 @@ class WeDetectTrainer(DetectionTrainer):
                     self.data[k] = v
             self.validator.dataloader = saved_loader
             self.test_loader = saved_test_loader
+            self.validator.save_dir = saved_save_dir
 
         if not fitnesses:
             return None, None
@@ -636,8 +655,6 @@ class WeDetectTrainer(DetectionTrainer):
         During training ``get_dataset`` replaces ``args.data`` with the mixed yaml
         dict. Standalone ``validator(model=best.pt)`` needs concrete yaml paths.
         """
-        from ultralytics.utils.torch_utils import strip_optimizer
-
         val_items = list(self.validation_data.items()) if self.validation_data else []
         if len(val_items) <= 1:
             data = self.args.data
@@ -655,12 +672,7 @@ class WeDetectTrainer(DetectionTrainer):
                     )
             return super().final_eval()
 
-        model = self.best if self.best.exists() else None
-        with torch_distributed_zero_first(LOCAL_RANK):
-            if RANK in {-1, 0}:
-                ckpt = strip_optimizer(self.last) if self.last.exists() else {}
-                if model:
-                    strip_optimizer(self.best, updates={"train_results": ckpt.get("train_results")})
+        model = self._strip_train_checkpoints()
         if not model:
             return
 
@@ -671,29 +683,34 @@ class WeDetectTrainer(DetectionTrainer):
         metrics_all: dict[str, float] = {}
         fitnesses: list[float] = []
         tags: list[str] = []
-        for i, (_val_path, vdata) in enumerate(val_items):
-            yaml_path = vdata.get("yaml_file")
-            if not yaml_path and isinstance(self.args.data, dict):
-                yolo_data = (self.args.data.get("val") or {}).get("yolo_data") or []
-                yaml_path = yolo_data[i] if i < len(yolo_data) else None
-            if not yaml_path:
-                LOGGER.warning(f"{colorstr('WeDetect:')} skip final val set {i}: no yaml_file")
-                continue
-            self.validator.args.data = str(yaml_path)
-            self.validator.args.split = "minival" if "lvis" in str(yaml_path).lower() else "val"
-            tag = self._val_metric_tag(vdata, i)
-            LOGGER.info(f"{colorstr('WeDetect val:')} final [{i + 1}/{len(val_items)}] {tag}")
-            metrics = self.validator(model=model)
-            if metrics is None:
-                continue
-            fit = float(metrics.pop("fitness", 0.0) or 0.0)
-            fitnesses.append(fit)
-            tags.append(tag)
-            if i == 0:
-                metrics_all.update(metrics)
-            for k, v in metrics.items():
-                metrics_all[f"{tag}/{k}"] = v
-            metrics_all[f"{tag}/fitness"] = fit
+        saved_save_dir = self.validator.save_dir
+        try:
+            for i, (_val_path, vdata) in enumerate(val_items):
+                yaml_path = vdata.get("yaml_file")
+                if not yaml_path and isinstance(self.args.data, dict):
+                    yolo_data = (self.args.data.get("val") or {}).get("yolo_data") or []
+                    yaml_path = yolo_data[i] if i < len(yolo_data) else None
+                if not yaml_path:
+                    LOGGER.warning(f"{colorstr('WeDetect:')} skip final val set {i}: no yaml_file")
+                    continue
+                self.validator.args.data = str(yaml_path)
+                self.validator.args.split = "minival" if "lvis" in str(yaml_path).lower() else "val"
+                tag = self._val_metric_tag(vdata, i)
+                self._bind_validator_save_dir(tag, saved_save_dir)
+                LOGGER.info(f"{colorstr('WeDetect val:')} final [{i + 1}/{len(val_items)}] {tag}")
+                metrics = self.validator(model=model)
+                if metrics is None:
+                    continue
+                fit = float(metrics.pop("fitness", 0.0) or 0.0)
+                fitnesses.append(fit)
+                tags.append(tag)
+                if i == 0:
+                    metrics_all.update(metrics)
+                for k, v in metrics.items():
+                    metrics_all[f"{tag}/{k}"] = v
+                metrics_all[f"{tag}/fitness"] = fit
+        finally:
+            self.validator.save_dir = saved_save_dir
 
         if fitnesses:
             weights = self._val_fitness_weights(len(fitnesses))

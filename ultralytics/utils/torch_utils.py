@@ -569,6 +569,9 @@ def get_flops(model, imgsz=640):
         stride = None if attn else max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32
         im = torch.empty((1, ch, *imgsz), device=p.device, dtype=p.dtype)  # input image in BCHW format
         custom_ops = {Attention: _attention_ops, AAttn: _attention_ops} if attn else None
+        # THOP's Module.apply re-visits shared submodules (HGBlock reuses one nn.ReLU across Convs) and
+        # leaves leftover hooks after cleanup; profile a copy so the live model is unchanged.
+        model = deepcopy(model)
         if full_size:
             return thop.profile(model, inputs=[im], custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2
         return thop.profile(model, inputs=[im], stride=stride, custom_ops=custom_ops, verbose=False)[0] / 1e9 * 2

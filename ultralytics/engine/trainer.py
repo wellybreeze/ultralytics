@@ -667,11 +667,14 @@ class BaseTrainer:
 
         seconds = time.time() - self.train_time_start
         LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
-        # Do final val with best.pt
+        # CSV plots only need results.csv; run before strip/final val so a later OOM cannot skip them
+        if RANK in {-1, 0} and self.args.plots:
+            self.plot_metrics()
+        self.optimizer = None  # AdamW state is ~checkpoint-sized; free it before loading last/best.pt
+        self.scaler = None
+        self._clear_memory()
         self.final_eval()
         if RANK in {-1, 0}:
-            if self.args.plots:
-                self.plot_metrics()
             self.run_callbacks("on_train_end")
         self._clear_memory()
         for loader in (self.train_loader, self.test_loader):
@@ -966,15 +969,24 @@ class BaseTrainer:
         path = Path(name)
         self.plots[path] = {"data": data, "timestamp": time.time()}
 
-    def final_eval(self):
-        """Perform final evaluation and validation for the YOLO model."""
+    def _strip_train_checkpoints(self):
+        """Strip optimizer from last.pt then best.pt without keeping both checkpoints in RAM."""
         model = self.best if self.best.exists() else None
         with torch_distributed_zero_first(LOCAL_RANK):  # strip only on GPU 0; other GPUs should wait
             if RANK in {-1, 0}:
-                ckpt = strip_optimizer(self.last) if self.last.exists() else {}
+                train_results = None
+                if self.last.exists():
+                    ckpt = strip_optimizer(self.last)
+                    train_results = ckpt.get("train_results")
+                    del ckpt
+                    gc.collect()
                 if model:
-                    # update best.pt train_metrics from last.pt
-                    strip_optimizer(self.best, updates={"train_results": ckpt.get("train_results")})
+                    strip_optimizer(self.best, updates={"train_results": train_results})
+        return model
+
+    def final_eval(self):
+        """Perform final evaluation and validation for the YOLO model."""
+        model = self._strip_train_checkpoints()
         if model:
             LOGGER.info(f"\nValidating {model}...")
             self.validator.args.plots = self.args.plots

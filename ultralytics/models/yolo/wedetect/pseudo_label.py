@@ -459,7 +459,7 @@ def _dfine_teacher_cls_map(
     COCO checkpoints (``nc=80``) use contiguous ids. Objects365 checkpoints (``nc=366``) reserve index 0 for background
     and match kept English prompts to head names.
     """
-    from ultralytics.models.define.model import ensure_dfine_class_names
+    from ultralytics.models.dfine.model import ensure_dfine_class_names
 
     inner = getattr(model, "model", model)
     ensure_dfine_class_names(inner)

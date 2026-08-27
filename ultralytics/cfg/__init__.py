@@ -311,6 +311,7 @@ CFG_BOOL_KEYS = frozenset(
         "visualize",
         "augment",
         "agnostic_nms",
+        "multi_label",
         "retina_masks",
         "show_boxes",
         "keras",

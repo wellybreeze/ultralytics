@@ -311,15 +311,23 @@ class WeDetectTrainer(DetectionTrainer):
         return data
 
     @staticmethod
-    def _resolve_val_img_path(d: dict) -> str:
-        """Pick val image list path; LVIS-style configs prefer ``minival`` when present."""
-        if d.get("minival") is not None:
+    def _resolve_val_img_path(d: dict, split: str = "val") -> str:
+        """Pick val image list. Use ``minival`` only when ``split=minival`` and the yaml defines that key."""
+        split = (split or "val").strip().lower()
+        if split == "minival" and d.get("minival") is not None:
             mv = d["minival"]
             if not Path(str(mv)).is_absolute():
                 d["minival"] = str(Path(d["path"]) / mv)
-            if "lvis" in str(d.get("val", "")).lower() or "lvis" in str(d.get("path", "")).lower():
-                return str(d["minival"])
+            return str(d["minival"])
         return str(d["val"])
+
+    @staticmethod
+    def _eval_split(d: dict, split: str = "val") -> str:
+        """Standalone ``final_eval`` split: honor ``args.split``; ``minival`` only if the yaml defines it."""
+        split = (split or "val").strip().lower()
+        if split == "minival" and d.get("minival") is not None:
+            return "minival"
+        return "val"
 
     @staticmethod
     def _val_metric_tag(d: dict, index: int) -> str:
@@ -667,8 +675,9 @@ class WeDetectTrainer(DetectionTrainer):
                     val = data["yaml_file"]
                 if val:
                     self.validator.args.data = val
-                    self.validator.args.split = (
-                        "minival" if isinstance(val, str) and "lvis" in str(val).lower() else "val"
+                    # Prefer resolved subset dict (has minival after check_det_dataset), not the mixed yaml
+                    self.validator.args.split = self._eval_split(
+                        self.data if isinstance(getattr(self, "data", None), dict) else {}
                     )
             return super().final_eval()
 
@@ -694,7 +703,7 @@ class WeDetectTrainer(DetectionTrainer):
                     LOGGER.warning(f"{colorstr('WeDetect:')} skip final val set {i}: no yaml_file")
                     continue
                 self.validator.args.data = str(yaml_path)
-                self.validator.args.split = "minival" if "lvis" in str(yaml_path).lower() else "val"
+                self.validator.args.split = self._eval_split(vdata)
                 tag = self._val_metric_tag(vdata, i)
                 self._bind_validator_save_dir(tag, saved_save_dir)
                 LOGGER.info(f"{colorstr('WeDetect val:')} final [{i + 1}/{len(val_items)}] {tag}")

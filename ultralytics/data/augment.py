@@ -2375,6 +2375,9 @@ class Format(BaseTransform):
         img = labels.get("img")
         h, w = img.shape[:2] if img is not None else (0, 0)
         cls = labels.pop("cls", np.array([]))
+        labels.pop("_extra_texts", None)
+        labels.pop("_ktw_sampled", None)
+        labels.pop("_ktw_image_texts", None)
         instances = labels.pop("instances", None)
         if instances is not None:
             instances.convert_bbox(format=self.bbox_format)
@@ -2743,15 +2746,17 @@ class RandomLoadText(BaseTransform):
         assert "texts" in labels, "No texts found in labels."
         class_texts = labels["texts"]
         num_classes = len(class_texts)
-        # Dynamic cap so global-vocab attach after dataset init still samples correctly
-        max_samples = min(max(num_classes, 1), self.max_samples)
+        # Sample from this image's text list (may be shorter than max_samples for nameless ktw-anno).
+        # When padding=True, always emit self.max_samples so encode_texts can reshape (B, N, D).
+        sample_cap = min(max(num_classes, 1), self.max_samples)
+        max_samples = self.max_samples if self.padding else sample_cap
         cls = np.asarray(labels.pop("cls"), dtype=int)
         pos_labels = np.unique(cls).tolist()
 
-        if len(pos_labels) > max_samples:
-            pos_labels = random.sample(pos_labels, k=max_samples)
+        if len(pos_labels) > sample_cap:
+            pos_labels = random.sample(pos_labels, k=sample_cap)
 
-        neg_samples = min(min(num_classes, max_samples) - len(pos_labels), random.randint(*self.neg_samples))
+        neg_samples = min(sample_cap - len(pos_labels), random.randint(*self.neg_samples))
         neg_samples = max(neg_samples, 0)
         neg_labels = [i for i in range(num_classes) if i not in pos_labels]
         neg_labels = random.sample(neg_labels, k=neg_samples) if neg_samples else []

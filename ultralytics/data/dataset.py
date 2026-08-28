@@ -40,10 +40,12 @@ from .utils import (
     dataset_root,
     get_hash,
     img2label_paths,
+    ktw_unique_names,
     load_dataset_cache_file,
     polygons2masks_overlap,
     portable_paths_hash,
     remap_label_im_files,
+    resolve_label_paths,
     save_dataset_cache_file,
     verify_image,
     verify_image_depth,
@@ -100,6 +102,8 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        self.ktw_open = False  # set in get_labels when YAML omitted names/nc for ktw-anno + WeDetect
+        self._ktw_bags: dict[tuple, tuple] = {}  # per-box shuffle bags for train sampling
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         # BaseDataset does not store hyp on self; read mask_refine from the constructor arg.
         hyp = kwargs.get("hyp")
@@ -166,7 +170,10 @@ class YOLODataset(BaseDataset):
             (list[str]): List of label file paths.
         """
         label_dir = (self.data or {}).get("labels_dir") or "labels"
-        self.label_files = img2label_paths(self.im_files, label_dir=str(label_dir))
+        self.label_files = resolve_label_paths(self.im_files, label_dir=str(label_dir))
+        n_json = sum(1 for p in self.label_files if str(p).endswith(".json"))
+        if n_json and LOCAL_RANK in {-1, 0}:
+            LOGGER.info(f"{self.prefix}{n_json} ktw-anno JSON label files (per-box label sampling at train time)")
         return self.label_files
 
     def get_cache_hash(self) -> str:
@@ -216,6 +223,7 @@ class YOLODataset(BaseDataset):
             repeat(nkpt),
             repeat(ndim),
             repeat(self.single_cls),
+            repeat(self._cache_name_to_id()),
         )
 
     def result_to_label(self, result: list) -> tuple[dict | None, int, int, int, int, str]:
@@ -227,7 +235,8 @@ class YOLODataset(BaseDataset):
         Returns:
             (tuple): (label dict or None, missing, found, empty, corrupt, message).
         """
-        im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg = result
+        im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg, *rest = result
+        instance_labels = rest[0] if rest else None
         label = (
             {
                 "im_file": im_file,
@@ -242,6 +251,8 @@ class YOLODataset(BaseDataset):
             if im_file
             else None
         )
+        if label is not None and instance_labels:
+            label["instance_labels"] = instance_labels
         return label, nm_f, nf_f, ne_f, nc_f, msg
 
     def verify_labels(self, labels: list[dict], cache_path: Path) -> None:
@@ -338,6 +349,7 @@ class YOLODataset(BaseDataset):
         [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
         self.im_files = [lb["im_file"] for lb in labels]  # update im_files
         self.verify_labels(labels, cache_path)
+        self._apply_ktw_auto_names(labels)
         return labels
 
     def build_transforms(self, hyp: dict | None = None) -> Compose:
@@ -412,6 +424,229 @@ class YOLODataset(BaseDataset):
         hyp.cutmix = 0.0
         self.transforms = self.build_transforms(hyp)
 
+    def _instance_label_groups(self) -> list[list[str]]:
+        """Synonym groups used to map ktw-anno strings to class ids (``data.names`` by default)."""
+        names = (self.data or {}).get("names") or {}
+        if not names:
+            return []
+        n = max(int(k) for k in names) + 1
+        groups: list[list[str]] = [[] for _ in range(n)]
+        for k, v in names.items():
+            i = int(k)
+            s = str(v).strip()
+            if 0 <= i < n and s:
+                groups[i] = [s]
+        return groups
+
+    def _allow_unknown_instance_labels(self) -> bool:
+        """Closed-set detect/segment drop unknown ktw strings; WeDetect OV may append them."""
+        return False
+
+    def _apply_ktw_auto_names(self, labels: list[dict]) -> None:
+        """Infer names from ktw-anno JSON when the data YAML omitted ``names`` / ``nc``.
+
+        WeDetect (``YOLOMultiModalDataset``) trains with per-image texts and does not build a global phrase vocab.
+        Val fills ``data["names"]`` from every unique JSON tag in this split (one mAP class per string).
+        Closed-set YOLO infers the same unique strings.
+        """
+        data = self.data or {}
+        names = data.get("names") or {}
+        name_vals = [str(v).strip().lower() for v in names.values()]
+        placeholder = (not self.single_cls) and len(name_vals) == 1 and name_vals[0] == "object"
+        auto = bool(data.get("_ktw_auto_names")) or placeholder
+        has_ktw = any(lb.get("instance_labels") for lb in labels)
+        self.ktw_open = False
+        if not auto:
+            return
+        if not has_ktw:
+            LOGGER.warning(
+                f"{self.prefix}data YAML has no names/nc and no ktw-anno JSON was found; "
+                "using placeholder class 'object'"
+            )
+            return
+        open_vocab = self._allow_unknown_instance_labels()
+        if open_vocab:
+            self.ktw_open = True
+            if self.augment:
+                if hasattr(self, "use_neg_queue"):
+                    self.use_neg_queue = True
+                if LOCAL_RANK in {-1, 0}:
+                    LOGGER.info(
+                        f"{self.prefix}ktw-anno: YAML omitted names; train uses per-image texts + NegQueue "
+                        "(not a global phrase vocab)"
+                    )
+                return
+            uniques = ktw_unique_names(labels, first_only=False)
+        else:
+            uniques = ktw_unique_names(labels, first_only=False)
+            if self.augment and LOCAL_RANK in {-1, 0}:
+                LOGGER.warning(
+                    f"{self.prefix}ktw-anno YAML omitted names; inferred {len(uniques)} closed-set classes from this "
+                    "split (train/val ids may disagree). Prefer WeDetect, or set names in the YAML."
+                )
+        if not uniques:
+            return
+        data["names"] = dict(enumerate(uniques))
+        data["nc"] = len(uniques)
+        if LOCAL_RANK in {-1, 0}:
+            LOGGER.info(f"{self.prefix}ktw-anno inferred {data['nc']} names from JSON labels")
+
+    def _cache_name_to_id(self) -> dict[str, int]:
+        """String → class id for ktw-anno cache-time cls (first in-vocab tag)."""
+        mapping: dict[str, int] = {}
+        for i, group in enumerate(self._instance_label_groups()):
+            for s in group:
+                k = str(s).strip()
+                if k and k not in mapping:
+                    mapping[k] = i
+                kl = k.lower()
+                if kl and kl not in mapping:
+                    mapping[kl] = i
+        return mapping
+
+    def _next_ktw_tag(self, im_file: str, box_i: int, cands: list[str]) -> str:
+        """Draw one tag from a per-box shuffle bag (without replacement until the bag is empty).
+
+        Each box keeps a shuffled copy of its ``labels``. Consecutive train views cycle through that
+        permutation so every tag is used equally often; the bag is reshuffled when exhausted.
+        """
+        if len(cands) == 1:
+            return cands[0]
+        key = (im_file, box_i)
+        sig = tuple(cands)
+        order, pos, prev = self._ktw_bags.get(key, (None, 0, None))
+        if order is None or pos >= len(order) or prev != sig:
+            order = list(cands)
+            random.shuffle(order)
+            pos = 0
+        chosen = order[pos]
+        self._ktw_bags[key] = (order, pos + 1, sig)
+        return chosen
+
+    def _apply_instance_label_sampling(self, label: dict) -> None:
+        """Sample one text per ktw-anno box at train time; expand all tags at val.
+
+        Train (``augment=True``) draws one tag from a per-box shuffle bag so every label is used equally
+        often while order stays random. Val duplicates the box once per in-vocab tag so mAP scores each
+        label independently (one-box-multi-label). Unknown strings are dropped unless
+        ``_allow_unknown_instance_labels`` (train only).
+        """
+        raw = label.pop("instance_labels", None)
+        if not raw:
+            return
+        bboxes = label.get("bboxes")
+        if bboxes is None:
+            return
+        n = min(len(raw), len(bboxes))
+        segments = label.get("segments") or []
+        keypoints = label.get("keypoints")
+        if getattr(self, "ktw_open", False) and self.augment:
+            self._apply_ktw_open_sampling(label, raw, bboxes, segments, keypoints, n)
+            return
+        groups = self._instance_label_groups()
+        text_to_id = self._cache_name_to_id()
+        n_groups = len(groups)
+        allow = self._allow_unknown_instance_labels() and self.augment
+        extras: list[list[str]] = []
+        extra_index: dict[str, int] = {}
+        keep_i: list[int] = []
+        keep_cls: list[int] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            tags = [self._next_ktw_tag(str(label.get("im_file", "")), i, cands)] if self.augment else cands
+            seen_cid: set[int] = set()
+            for chosen in tags:
+                cid = text_to_id.get(chosen, text_to_id.get(chosen.lower()))
+                if cid is None:
+                    if not allow:
+                        continue
+                    if chosen not in extra_index:
+                        extra_index[chosen] = len(extras)
+                        extras.append([chosen])
+                    cid = n_groups + extra_index[chosen]
+                if cid in seen_cid:
+                    continue
+                seen_cid.add(cid)
+                keep_i.append(i)
+                keep_cls.append(cid)
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            if extras:
+                label["_extra_texts"] = extras
+            return
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        if extras:
+            label["_extra_texts"] = extras
+
+    def _apply_ktw_open_sampling(
+        self,
+        label: dict,
+        raw: list,
+        bboxes,
+        segments,
+        keypoints,
+        n: int,
+    ) -> None:
+        """Sample one string per box and build a per-image text list (no global vocab)."""
+        keep_i: list[int] = []
+        chosen: list[str] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            keep_i.append(i)
+            chosen.append(self._next_ktw_tag(str(label.get("im_file", "")), i, cands))
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            label["_ktw_image_texts"] = []
+            return
+        text2id: dict[str, int] = {}
+        texts: list[list[str]] = []
+        keep_cls: list[int] = []
+        for s in chosen:
+            if s not in text2id:
+                text2id[s] = len(texts)
+                texts.append([s])
+            keep_cls.append(text2id[s])
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        label["_ktw_image_texts"] = texts
+
     def update_labels_info(self, label: dict) -> dict:
         """Update label format for different tasks.
 
@@ -425,6 +660,7 @@ class YOLODataset(BaseDataset):
             cls is not with bboxes now, classification and semantic segmentation need an independent cls label
             Can also support classification and semantic segmentation by adding or removing dict keys there.
         """
+        self._apply_instance_label_sampling(label)
         bboxes = label.pop("bboxes")
         segments = label.pop("segments", [])
         keypoints = label.pop("keypoints", None)
@@ -649,6 +885,14 @@ class YOLOMultiModalDataset(YOLODataset):
         self.use_neg_queue = bool((data or {}).get("use_neg_queue", False))
         super().__init__(*args, data=data, task=task, **kwargs)
 
+    def _instance_label_groups(self) -> list[list[str]]:
+        """Map ktw-anno strings through class_texts (including global mix) rather than names only."""
+        return [list(t) for t in self._active_texts]
+
+    def _allow_unknown_instance_labels(self) -> bool:
+        """Append instance-specific phrases not in the vocab as extra per-image texts (WeDetect OV)."""
+        return True
+
     def _load_class_texts(self, data: dict) -> list[list[str]] | None:
         """Load class texts from external JSON file or return None to use data.names fallback.
 
@@ -669,10 +913,14 @@ class YOLOMultiModalDataset(YOLODataset):
             raw = json.load(f)
         if not isinstance(raw, list) or len(raw) == 0:
             return None
-        nc = int(data.get("nc", 0) or 0)
         parsed = [[s.strip() for s in (x if isinstance(x, list) else [x]) if str(s).strip()] for x in raw]
         parsed = [row for row in parsed if row]
         LOGGER.info(f"Loaded class_texts from '{p}' ({len(parsed)} classes)")
+        if parsed and data.get("_ktw_auto_names"):
+            data["names"] = {i: row[0] for i, row in enumerate(parsed)}
+            data["nc"] = len(parsed)
+            data["_ktw_auto_names"] = False
+        nc = int(data.get("nc", 0) or 0)
         if nc > 0 and len(parsed) < nc:
             LOGGER.warning(f"class_texts count ({len(parsed)}) < nc ({nc}); missing classes will fall back at runtime")
         elif nc > 0 and len(parsed) > nc:
@@ -713,7 +961,7 @@ class YOLOMultiModalDataset(YOLODataset):
         """Update ``RandomLoadText`` after global texts are attached (WeDetect OV path)."""
         if not getattr(self, "transforms", None) or not self.augment:
             return
-        n = min(len(self._active_texts), max_samples)
+        n = max_samples if getattr(self, "ktw_open", False) else min(len(self._active_texts), max_samples)
         for t in self.transforms.transforms:
             if isinstance(t, RandomLoadText):
                 t.max_samples = n
@@ -739,8 +987,16 @@ class YOLOMultiModalDataset(YOLODataset):
             (dict): Updated label dictionary with instances and texts.
         """
         labels = super().update_labels_info(label)
-        texts = [list(t) for t in self._active_texts]
-        if self._local_to_global is not None:
+        extras = labels.pop("_extra_texts", None)
+        sampled = labels.pop("_ktw_sampled", False)
+        image_texts = labels.pop("_ktw_image_texts", None)
+        if image_texts is not None:
+            texts = [list(t) for t in image_texts]
+        else:
+            texts = [list(t) for t in self._active_texts]
+            if extras:
+                texts.extend(extras)
+        if self._local_to_global is not None and not sampled:
             cls = labels["cls"].flatten().astype(int)
             labels["cls"] = np.array([self._local_to_global.get(c, c) for c in cls]).reshape(labels["cls"].shape)
         if self.use_neg_queue and self.augment:
@@ -763,11 +1019,13 @@ class YOLOMultiModalDataset(YOLODataset):
             getattr(hyp, "use_neg_queue", False) or (isinstance(hyp, dict) and hyp.get("use_neg_queue"))
         ):
             self.use_neg_queue = True
-        # WeDetect (class_texts JSON / NegQueue): empty-string pad. YOLO-World/YOLOE: frequency negatives.
-        if self.use_neg_queue or self._class_texts is not None:
+        # WeDetect (class_texts JSON / NegQueue / nameless ktw-anno): empty-string pad.
+        # YOLO-World/YOLOE: frequency negatives.
+        if self.use_neg_queue or self._class_texts is not None or getattr(self, "ktw_open", False):
             if self.augment:
+                n_texts = 80 if getattr(self, "ktw_open", False) else min(max(len(self._active_texts), 1), 80)
                 transform = RandomLoadText(
-                    max_samples=min(max(len(self._active_texts), 1), 80),
+                    max_samples=n_texts,
                     padding=True,
                     padding_value=[""],
                 )
@@ -802,7 +1060,8 @@ class YOLOMultiModalDataset(YOLODataset):
     def neg_queue(self) -> _NegQueue:
         """Return (and lazily create) the negative text queue."""
         if self._neg_queue is None:
-            self._neg_queue = _NegQueue(size=min(len(self.class_texts), 80))
+            size = 80 if getattr(self, "ktw_open", False) else min(max(len(self.class_texts), 1), 80)
+            self._neg_queue = _NegQueue(size=size)
         return self._neg_queue
 
     @staticmethod
@@ -828,7 +1087,7 @@ def build_global_class_texts(datasets: list) -> list[list[str]]:
         (list[list[str]]): Unified global class texts. Empty if fewer than two multimodal datasets (caller should keep
             local texts).
     """
-    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
+    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset) and not getattr(ds, "ktw_open", False)]
     if len(multimodal) < 2:
         for ds in multimodal:
             LOGGER.info(f"Single dataset '{ds.img_path}', using local class_texts ({len(ds.class_texts)} classes)")

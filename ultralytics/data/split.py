@@ -6,7 +6,7 @@ import random
 import shutil
 from pathlib import Path
 
-from ultralytics.data.utils import IMG_FORMATS, img2label_paths
+from ultralytics.data.utils import IMG_FORMATS, resolve_label_paths
 from ultralytics.utils import DATASETS_DIR, LOGGER, TQDM
 
 
@@ -127,9 +127,9 @@ def autosplit(
         if (path.parent / x).exists():
             (path.parent / x).unlink()  # remove existing
 
-    LOGGER.info(f"Autosplitting images from {path}" + ", using *.txt labeled images only" * annotated_only)
+    LOGGER.info(f"Autosplitting images from {path}" + ", using labeled images only" * annotated_only)
     for i, img in TQDM(zip(indices, files), total=n):
-        if not annotated_only or Path(img2label_paths([str(img)])[0]).exists():  # check label
+        if not annotated_only or Path(resolve_label_paths([str(img)])[0]).exists():  # check label
             with open(path.parent / txt[i], "a", encoding="utf-8") as f:
                 f.write(f"./{img.relative_to(path.parent).as_posix()}" + "\n")  # add image to txt file
 

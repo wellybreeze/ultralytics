@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.data.utils import ktw_plot_instances
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel
@@ -235,9 +236,15 @@ class DetectionTrainer(BaseTrainer):
 
     def plot_training_labels(self):
         """Create a labeled training plot of the YOLO model."""
-        boxes = np.concatenate([lb["bboxes"] for lb in self.train_loader.dataset.labels], 0)
-        cls = np.concatenate([lb["cls"] for lb in self.train_loader.dataset.labels], 0)
-        plot_labels(boxes, cls.squeeze(), names=self.data["names"], save_dir=self.save_dir, on_plot=self.on_plot)
+        labels = self.train_loader.dataset.labels
+        plotted = ktw_plot_instances(labels)
+        if plotted is not None:
+            boxes, cls, names = plotted
+        else:
+            boxes = np.concatenate([lb["bboxes"] for lb in labels], 0)
+            cls = np.concatenate([lb["cls"] for lb in labels], 0)
+            names = self.data["names"]
+        plot_labels(boxes, cls.squeeze(), names=names, save_dir=self.save_dir, on_plot=self.on_plot)
 
     def auto_batch(self):
         """Get optimal batch size by calculating memory occupation of model.

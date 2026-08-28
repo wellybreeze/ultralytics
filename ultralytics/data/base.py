@@ -204,6 +204,9 @@ class BaseDataset(Dataset):
                     self.labels[i]["segments"] = [segments[si] for si, idx in enumerate(j) if idx]
                 if keypoints is not None:
                     self.labels[i]["keypoints"] = keypoints[j]
+                inst = self.labels[i].get("instance_labels")
+                if inst:
+                    self.labels[i]["instance_labels"] = [inst[si] for si, idx in enumerate(j) if idx]
             if self.single_cls:
                 self.labels[i]["cls"][:] = 0
 

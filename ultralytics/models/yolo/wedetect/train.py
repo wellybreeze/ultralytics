@@ -110,6 +110,8 @@ class WeDetectTrainer(DetectionTrainer):
         assigner must use the text-slot count, not annotated ``nc`` alone.
         """
         nc = int(self.data.get("nc") or 80)
+        if self.data.get("_ktw_auto_names"):
+            nc = max(nc, 80)  # nameless ktw-anno: RandomLoadText uses up to 80 per-image slots
         override = getattr(self, "_train_data_override", None)
         if isinstance(override, dict) and override.get("nc"):
             nc = max(nc, int(override["nc"]))
@@ -429,6 +431,8 @@ class WeDetectTrainer(DetectionTrainer):
         final_data["names"] = primary["names"]
         final_data["path"] = primary["path"]
         final_data["channels"] = primary["channels"]
+        if primary.get("_ktw_auto_names"):
+            final_data["_ktw_auto_names"] = True
         if "class_texts" in primary:
             final_data["class_texts"] = primary["class_texts"]
         self.data = final_data
@@ -763,17 +767,37 @@ class WeDetectTrainer(DetectionTrainer):
         if mode == "train" and getattr(self, "_train_data_override", None) is not None:
             data = self._train_data_override
         elif mode == "val" and isinstance(data, dict):
+            vdata = (getattr(self, "validation_data", None) or {}).get(str(img_path))
+            if vdata:
+                data = vdata
             # Ensure val reads original GT labels even if train override set labels_dir
             data = {**data, "labels_dir": "labels"}
 
         dataset = build_yolo_dataset(
             self.args, img_path, batch, data, mode=mode, rect=mode == "val", stride=gs, multi_modal=mode == "train"
         )
+        if mode == "val":
+            self._publish_ktw_val_names(dataset, img_path)
         if mode == "train" and bool(getattr(self.args, "use_neg_queue", False)):
             attach_shared_neg_queue([dataset], size=80)
         if mode == "train" and self.freeze_text_encoder:
             self.set_text_embeddings([dataset], batch)
         return dataset
+
+    def _publish_ktw_val_names(self, dataset, img_path) -> None:
+        """Copy ktw-anno inferred val names onto trainer.data so WeDetect prompts match GT class ids."""
+        d = getattr(dataset, "data", None)
+        if not isinstance(d, dict) or not d.get("names"):
+            return
+        self.data["names"] = d["names"]
+        self.data["nc"] = d.get("nc", len(d["names"]))
+        if d.get("_ktw_auto_names"):
+            self.data["_ktw_auto_names"] = True
+        key = str(img_path)
+        vdata = (getattr(self, "validation_data", None) or {}).get(key)
+        if vdata is not None:
+            vdata["names"] = d["names"]
+            vdata["nc"] = self.data["nc"]
 
     def set_text_embeddings(self, datasets: list[Any], batch: int | None) -> None:
         """Set text embeddings for datasets to accelerate training."""

@@ -25,6 +25,7 @@ from ultralytics.data.utils import (
     load_dataset_cache_file,
     portable_paths_hash,
     remap_label_im_files,
+    resolve_label_paths,
     save_dataset_cache_file,
 )
 from ultralytics.data.utils import (
@@ -1332,13 +1333,18 @@ def _gt_entry_from_label(lb: dict, im: str, nc_gt: int) -> dict:
     """Filter GT classes and normalize one label entry for merge/rebuild."""
     cls = np.asarray(lb["cls"], dtype=np.float32).reshape(-1)
     bboxes = np.asarray(lb["bboxes"], dtype=np.float32).reshape(-1, 4)
+    inst = lb.get("instance_labels")
     if len(cls):
         keep = (cls >= 0) & (cls < nc_gt)
         cls, bboxes = cls[keep], bboxes[keep]
+        if inst:
+            inst = [inst[i] for i, k in enumerate(keep) if k]
     entry = dict(lb)
     entry["im_file"] = im
     entry["cls"] = cls.reshape(-1, 1) if len(cls) else _empty_cls()
     entry["bboxes"] = bboxes if len(bboxes) else _empty_xywh()
+    if inst is not None:
+        entry["instance_labels"] = inst
     return entry
 
 
@@ -1378,7 +1384,8 @@ def _scan_gt_shard(
             total=len(shard_im),
             desc=f"{prefix}scan GT {cache_path.parent.name}",
         ):
-            im_file, lb, shape, _segments, _keypoints, nm_f, nf_f, ne_f, nc_f, msg = result
+            im_file, lb, shape, _segments, _keypoints, nm_f, nf_f, ne_f, nc_f, msg, *rest = result
+            instance_labels = rest[0] if rest else None
             nm += nm_f
             nf += nf_f
             ne += ne_f
@@ -1387,18 +1394,19 @@ def _scan_gt_shard(
                 msgs.append(msg)
             if not im_file:
                 continue
-            labels.append(
-                {
-                    "im_file": im_file,
-                    "shape": shape,
-                    "cls": lb[:, 0:1],
-                    "bboxes": lb[:, 1:],
-                    "segments": [],
-                    "keypoints": None,
-                    "normalized": True,
-                    "bbox_format": "xywh",
-                }
-            )
+            entry = {
+                "im_file": im_file,
+                "shape": shape,
+                "cls": lb[:, 0:1],
+                "bboxes": lb[:, 1:],
+                "segments": [],
+                "keypoints": None,
+                "normalized": True,
+                "bbox_format": "xywh",
+            }
+            if instance_labels:
+                entry["instance_labels"] = instance_labels
+            labels.append(entry)
     expected = portable_paths_hash(shard_lb + shard_im, root=root)
     save_dataset_cache_file(
         prefix,
@@ -1423,7 +1431,7 @@ def load_gt_label_entries(im_files: list[str], nc_gt: int, root: Path | None = N
     from collections import defaultdict
 
     root = root or _dataset_root(None, im_files)
-    gt_label_files = img2label_paths(im_files, label_dir="labels")
+    gt_label_files = resolve_label_paths(im_files, label_dir="labels")
     shards: dict[Path, list[tuple[str, str]]] = defaultdict(list)
     for im, lb in zip(im_files, gt_label_files):
         shards[Path(lb).parent].append((im, lb))
@@ -1912,7 +1920,7 @@ def apply_pseudo_labels_to_subset(
     source_texts_path = resolve_source_class_texts_path(data)
     class_texts_path = resolve_train_class_texts_path(data)
     im_files = collect_image_files(train_path)
-    gt_label_files = img2label_paths(im_files, label_dir="labels")
+    gt_label_files = resolve_label_paths(im_files, label_dir="labels")
     root = _dataset_root(data, im_files)
     out_root = root or Path(train_path).parent
     meta_path = out_root / PSEUDO_META_NAME

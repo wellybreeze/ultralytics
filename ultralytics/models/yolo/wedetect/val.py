@@ -50,6 +50,32 @@ def resolve_wedetect_class_names(data: dict) -> list[str]:
     return prompts[:nc]
 
 
+def ktw_realign_val_names(data: dict | None, model_names) -> list[str] | None:
+    """Return JSON-inferred val class names when they disagree with the model vocab.
+
+    YAML without ``names`` uses a placeholder ``object`` class. The val dataset then fills
+    ``data["names"]`` from unique ktw-anno tags. Confusion-matrix ``nc`` and text prompts must
+    follow those inferred names; using the placeholder yields ``IndexError`` on GT class ids.
+    Closed-set YAML / ``class_texts`` vocabs are left unchanged.
+    """
+    if not isinstance(data, dict):
+        return None
+    names_map = data.get("names") or {}
+    if not names_map:
+        return None
+    inferred = [str(names_map[k]).split("/", 1)[0] for k in sorted(names_map, key=lambda x: int(x))]
+    if isinstance(model_names, dict):
+        current = [str(model_names[k]).split("/", 1)[0] for k in sorted(model_names, key=lambda x: int(x))]
+    else:
+        current = [str(x).split("/", 1)[0] for x in (model_names or [])]
+    if inferred == current:
+        return None
+    placeholder = len(current) == 1 and current[0].strip().lower() == "object"
+    if data.get("_ktw_auto_names") or placeholder or len(inferred) != len(current):
+        return inferred
+    return None
+
+
 def prepare_wedetect_text_prompts(model, names: list[str], device=None) -> None:
     """Encode class prompts into ``txt_feats`` and align ``names`` / head ``nc``.
 
@@ -132,13 +158,25 @@ class WeDetectValidator(DetectionValidator):
         data = check_det_dataset(data_arg)
         names = resolve_wedetect_class_names(data)
         state = (getattr(model, "names", None), getattr(model, "txt_feats", None), model.model[-1].nc)
-        prepare_wedetect_text_prompts(model, names, device=self.device)
+        # Placeholder {0: object} is not the val vocab; init_metrics realigns after JSON inference.
+        if not (data.get("_ktw_auto_names") or (len(names) == 1 and names[0].strip().lower() == "object")):
+            prepare_wedetect_text_prompts(model, names, device=self.device)
         try:
             # Standalone val owns args.data → loader; drop any prior-set dataloader.
             self.dataloader = None
             return super().__call__(trainer, model)
         finally:
             model.names, model.txt_feats, model.model[-1].nc = state
+
+    def init_metrics(self, model: torch.nn.Module) -> None:
+        """Align ktw-anno val prompts to JSON-inferred names before building the confusion matrix."""
+        ds = getattr(getattr(self, "dataloader", None), "dataset", None)
+        data = getattr(ds, "data", None) or self.data
+        names = ktw_realign_val_names(data, getattr(model, "names", None))
+        if names:
+            prepare_wedetect_text_prompts(model, names, device=self.device)
+            LOGGER.info(f"WeDetect val prompts ({len(names)}): {names[:8]}{'...' if len(names) > 8 else ''}")
+        super().init_metrics(model)
 
 
 class WeDetectUniValidator(DetectionValidator):

@@ -25,6 +25,34 @@ DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
 
 
+def _concat_cls_multihot(items: list[dict[str, Any]]) -> np.ndarray | None:
+    """Concatenate per-box multi-hot rows; missing entries fall back to one-hot from ``cls``."""
+    arrs = [x.get("cls_multihot") for x in items]
+    if all(a is None for a in arrs):
+        return None
+    widths = [int(a.shape[-1]) for a in arrs if a is not None]
+    c_dim = max(widths) if widths else 0
+    out = []
+    for item, a in zip(items, arrs):
+        n = len(item["cls"])
+        if a is None:
+            a = np.zeros((n, c_dim), dtype=np.float32)
+            if n and c_dim:
+                ids = np.asarray(item["cls"]).reshape(-1).astype(int)
+                valid = (ids >= 0) & (ids < c_dim)
+                a[np.flatnonzero(valid), ids[valid]] = 1
+        else:
+            a = np.asarray(a, dtype=np.float32)
+            if a.ndim == 1:
+                a = a.reshape(-1, 1)
+            if a.shape[-1] < c_dim:
+                z = np.zeros((a.shape[0], c_dim), dtype=np.float32)
+                z[:, : a.shape[-1]] = a
+                a = z
+        out.append(a)
+    return np.concatenate(out, 0) if out else None
+
+
 class BaseTransform:
     """Base class for image transformations in the Ultralytics library.
 
@@ -453,6 +481,7 @@ class BaseMixTransform(BaseTransform):
         syn2id = {k: i for i, ks in enumerate(key_sets) for k in ks}
 
         for label in [labels] + labels["mix_labels"]:
+            old_texts = label["texts"]
             for i, cls in enumerate(label["cls"].squeeze(-1).tolist()):
                 group = _as_group(label["texts"][int(cls)])
                 gid = 0
@@ -462,6 +491,21 @@ class BaseMixTransform(BaseTransform):
                         gid = found
                         break
                 label["cls"][i] = gid
+            mh = label.get("cls_multihot")
+            if mh is not None:
+                mh = np.asarray(mh, dtype=np.float32)
+                new_mh = np.zeros((len(mh), len(merged)), dtype=np.float32)
+                for old_i, text in enumerate(old_texts):
+                    group = _as_group(text)
+                    gid = 0
+                    for s in group:
+                        found = syn2id.get(str(s).strip().lower())
+                        if found is not None:
+                            gid = found
+                            break
+                    if old_i < mh.shape[1]:
+                        new_mh[:, gid] = np.maximum(new_mh[:, gid], mh[:, old_i])
+                label["cls_multihot"] = new_mh
             label["texts"] = merged
         return labels
 
@@ -801,6 +845,9 @@ class Mosaic(BaseMixTransform):
         final_labels["instances"].clip(imgsz, imgsz, preserve_obb=self.preserve_obb)
         good = final_labels["instances"].remove_zero_area_boxes()
         final_labels["cls"] = final_labels["cls"][good]
+        mh = _concat_cls_multihot(mosaic_labels)
+        if mh is not None:
+            final_labels["cls_multihot"] = mh[good]
         if "texts" in mosaic_labels[0]:
             final_labels["texts"] = mosaic_labels[0]["texts"]
         return final_labels
@@ -881,8 +928,11 @@ class MixUp(BaseMixTransform):
             (dict): Updated labels with concatenated instances.
         """
         labels2 = labels["mix_labels"][0]
+        mh = _concat_cls_multihot([labels, labels2])
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        if mh is not None:
+            labels["cls_multihot"] = mh
         return labels
 
     def apply_semantic(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1054,8 +1104,17 @@ class CutMix(BaseMixTransform):
             indexes2 = indexes2[instances2.remove_zero_area_boxes()]
         instances2.add_padding(x1, y1)
 
+        right = {
+            "cls": labels2["cls"][indexes2],
+            "cls_multihot": None
+            if labels2.get("cls_multihot") is None
+            else np.asarray(labels2["cls_multihot"])[indexes2],
+        }
+        mh = _concat_cls_multihot([labels, right])
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"][indexes2]], axis=0)
         labels["instances"] = Instances.concatenate([labels["instances"], instances2], axis=0)
+        if mh is not None:
+            labels["cls_multihot"] = mh
         return labels
 
     def apply_semantic(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1268,6 +1327,8 @@ class RandomPerspective(BaseTransform):
         )
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
+        if "cls_multihot" in labels:
+            labels["cls_multihot"] = np.asarray(labels["cls_multihot"])[i]
         return labels
 
     def apply_bboxes(self, bboxes: np.ndarray, M: np.ndarray) -> np.ndarray:
@@ -2001,6 +2062,7 @@ class CopyPaste(BaseMixTransform):
         params["selected"] = selected
         params["im_new"] = im_new
         params["labels2_cls"] = labels2.get("cls")
+        params["labels2_mh"] = labels2.get("cls_multihot")
         params["labels2_img"] = labels2.get("img")
         return params
 
@@ -2053,6 +2115,12 @@ class CopyPaste(BaseMixTransform):
         if len(selected):
             cls = np.concatenate((cls, (labels2_cls if labels2_cls is not None else cls)[selected]), axis=0)
             instances = Instances.concatenate([instances, instances2[selected]], axis=0)
+            mh = labels.get("cls_multihot")
+            mh2 = params.get("labels2_mh")
+            if mh is not None or mh2 is not None:
+                right_cls = (labels2_cls if labels2_cls is not None else labels["cls"])[selected]
+                right = {"cls": right_cls, "cls_multihot": None if mh2 is None else np.asarray(mh2)[selected]}
+                labels["cls_multihot"] = _concat_cls_multihot([{"cls": labels["cls"], "cls_multihot": mh}, right])
 
         labels["cls"] = cls
         labels["instances"] = instances
@@ -2284,6 +2352,8 @@ class Albumentations(BaseTransform):
                     instances.update(np.array(new["bboxes"], dtype=np.float32).reshape(-1, 4), keypoints=keypoints)
                 labels["img"] = new["image"]
                 labels["cls"] = cls[i].reshape(-1, 1)
+                if "cls_multihot" in labels:
+                    labels["cls_multihot"] = np.asarray(labels["cls_multihot"])[i]
                 labels["instances"] = instances
                 if mask is not None:
                     labels[key] = new["mask"]
@@ -2375,6 +2445,7 @@ class Format(BaseTransform):
         img = labels.get("img")
         h, w = img.shape[:2] if img is not None else (0, 0)
         cls = labels.pop("cls", np.array([]))
+        mh = labels.pop("cls_multihot", None)
         labels.pop("_extra_texts", None)
         labels.pop("_ktw_sampled", None)
         labels.pop("_ktw_image_texts", None)
@@ -2382,7 +2453,14 @@ class Format(BaseTransform):
         if instances is not None:
             instances.convert_bbox(format=self.bbox_format)
             instances.denormalize(w, h)
-        return {"h": h, "w": w, "cls": cls, "instances": instances, "nl": len(instances) if instances else 0}
+        return {
+            "h": h,
+            "w": w,
+            "cls": cls,
+            "cls_multihot": mh,
+            "instances": instances,
+            "nl": len(instances) if instances else 0,
+        }
 
     def apply_image(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Format image from Numpy array to PyTorch tensor.
@@ -2448,6 +2526,12 @@ class Format(BaseTransform):
             labels["masks"] = masks
             labels["sem_masks"] = sem_masks.float()
         labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, 1)
+        mh = params.get("cls_multihot")
+        if mh is not None:
+            mh = np.asarray(mh, dtype=np.float32)
+            if mh.ndim == 1:
+                mh = mh.reshape(-1, 1)
+            labels["cls_multihot"] = torch.from_numpy(mh) if nl else torch.zeros((0, mh.shape[-1]))
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
         if self.return_keypoint:
             labels["keypoints"] = (
@@ -2750,8 +2834,15 @@ class RandomLoadText(BaseTransform):
         # When padding=True, always emit self.max_samples so encode_texts can reshape (B, N, D).
         sample_cap = min(max(num_classes, 1), self.max_samples)
         max_samples = self.max_samples if self.padding else sample_cap
+        mh = labels.get("cls_multihot")
         cls = np.asarray(labels.pop("cls"), dtype=int)
-        pos_labels = np.unique(cls).tolist()
+        if mh is not None:
+            mh = np.asarray(mh, dtype=np.float32)
+            pos_labels = np.flatnonzero(mh.any(0)).tolist() if mh.size else []
+            if not pos_labels:
+                pos_labels = np.unique(cls).tolist()
+        else:
+            pos_labels = np.unique(cls).tolist()
 
         if len(pos_labels) > sample_cap:
             pos_labels = random.sample(pos_labels, k=sample_cap)
@@ -2790,7 +2881,14 @@ class RandomLoadText(BaseTransform):
 
         assert len(texts) == max_samples
 
-        return {"valid_idx": valid_idx, "new_cls": np.array(new_cls), "texts": texts}
+        return {
+            "valid_idx": valid_idx,
+            "new_cls": np.array(new_cls),
+            "texts": texts,
+            "cls_multihot": mh,
+            "sampled_labels": sampled_labels,
+            "max_samples": max_samples,
+        }
 
     def apply_instances(self, labels: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         """Filter instances and update class labels based on sampled texts.
@@ -2805,6 +2903,18 @@ class RandomLoadText(BaseTransform):
         labels["instances"] = labels["instances"][params["valid_idx"]]
         labels["cls"] = params["new_cls"]
         labels["texts"] = params["texts"]
+        mh = params.get("cls_multihot")
+        sampled = params.get("sampled_labels")
+        if mh is not None:
+            mh = np.asarray(mh, dtype=np.float32)[params["valid_idx"]]
+            if sampled is not None:
+                c_out = int(params.get("max_samples") or len(sampled))
+                new_mh = np.zeros((mh.shape[0], c_out), dtype=np.float32)
+                for new_i, old_i in enumerate(sampled):
+                    if 0 <= int(old_i) < mh.shape[1]:
+                        new_mh[:, new_i] = mh[:, int(old_i)]
+                mh = new_mh
+            labels["cls_multihot"] = mh
         return labels
 
 

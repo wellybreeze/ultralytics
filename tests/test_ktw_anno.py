@@ -392,3 +392,194 @@ def test_confusion_matrix_placeholder_nc_raises_on_ktw_gt():
     aligned = ConfusionMatrix(names={0: "人", 1: "未戴安全帽", 2: "未穿反光衣"})
     aligned.process_batch(pred, batch)
     assert aligned.matrix.shape == (4, 4)
+
+
+def test_closed_ktw_train_keeps_one_box_multihot(tmp_path: Path):
+    """Closed-vocab WeDetect train: one physical box, all tags on as multi-hot (not one sampled id)."""
+    images = tmp_path / "images"
+    labels = tmp_path / "labels"
+    images.mkdir()
+    labels.mkdir()
+    Image.new("RGB", (100, 80)).save(images / "a.jpg")
+    obj = {
+        "format": "ktw-anno",
+        "schemaVersion": 2,
+        "imageWidth": 100,
+        "imageHeight": 80,
+        "shapes": [
+            {
+                "labels": ["人", "未戴安全帽的人", "未穿反光衣的人"],
+                "points": [[10, 10], [50, 50]],
+                "shape_type": "rectangle",
+            }
+        ],
+    }
+    (labels / "a.json").write_text(json.dumps(obj), encoding="utf-8")
+    data = {
+        "names": {0: "人", 1: "未戴安全帽的人", 2: "未穿反光衣的人"},
+        "nc": 3,
+        "channels": 3,
+    }
+    hyp = IterableSimpleNamespace(
+        **{**vars(DEFAULT_CFG), "mosaic": 0.0, "mixup": 0.0, "cutmix": 0.0, "copy_paste": 0.0}
+    )
+    ds = YOLOMultiModalDataset(
+        img_path=str(images), data=data, task="detect", augment=True, imgsz=64, cache=False, hyp=hyp
+    )
+    assert ds.ktw_open is False
+    item = ds.get_image_and_label(0)
+    assert len(item["cls"]) == 1
+    assert int(item["cls"].reshape(-1)[0]) == 0
+    mh = item["cls_multihot"]
+    assert mh.shape == (1, 3)
+    np.testing.assert_array_equal(mh[0], [1, 1, 1])
+    batch = ds.collate_fn([ds[0]])
+    assert batch["cls"].shape[0] == 1
+    assert batch["cls_multihot"].shape[0] == 1
+    assert batch["cls_multihot"].shape[1] >= 3
+    assert float(batch["cls_multihot"][0, :3].sum()) == 3.0
+
+
+def test_tal_multihot_targets_keep_coexisting_classes():
+    """TAL one-hot would zero co-labels; multi-hot must keep [1,1,0] on the assigned prior."""
+    import torch
+
+    from ultralytics.utils.tal import TaskAlignedAssigner
+
+    a = TaskAlignedAssigner(num_classes=3)
+    a.bs = 1
+    a.n_max_boxes = 1
+    gt_labels = torch.tensor([[[0.0]]])
+    gt_bboxes = torch.tensor([[[0.0, 0.0, 10.0, 10.0]]])
+    target_gt_idx = torch.tensor([[0, 0]])
+    fg_mask = torch.tensor([[1.0, 1.0]])
+    _, _, onehot = a.get_targets(gt_labels, gt_bboxes, target_gt_idx.clone(), fg_mask)
+    assert onehot[0, 0].tolist() == [1, 0, 0]
+    gt_multi = torch.tensor([[[1.0, 1.0, 0.0]]])
+    _, _, multi = a.get_targets(gt_labels, gt_bboxes, target_gt_idx, fg_mask, gt_multi_hot=gt_multi)
+    assert multi[0, 0].tolist() == [1, 1, 0]
+
+
+def test_tal_multihot_alignment_uses_max_positive_class():
+    """Subset-class score must be able to win assignment even if primary class logit is low."""
+    import torch
+
+    from ultralytics.utils.tal import TaskAlignedAssigner
+
+    a = TaskAlignedAssigner(num_classes=3, alpha=1.0, beta=1.0)
+    a.bs = 1
+    a.n_max_boxes = 1
+    pd_scores = torch.zeros(1, 2, 3)
+    pd_scores[0, 0, 0] = 0.1
+    pd_scores[0, 0, 1] = 0.9
+    pd_scores[0, 1, 0] = 0.2
+    pd_bboxes = torch.tensor([[[0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 30.0, 30.0]]])
+    gt_labels = torch.tensor([[[0.0]]])
+    gt_bboxes = torch.tensor([[[0.0, 0.0, 10.0, 10.0]]])
+    mask_gt = torch.ones(1, 1, 2)
+    gt_multi = torch.tensor([[[1.0, 1.0, 0.0]]])
+    align_one, _ = a.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
+    align_multi, _ = a.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt, gt_multi_hot=gt_multi)
+    assert float(align_multi[0, 0, 0]) > float(align_one[0, 0, 0])
+
+
+def test_random_load_text_remaps_multihot_columns():
+    """RandomLoadText must permute multi-hot columns with sampled text ids, not drop co-labels."""
+    from ultralytics.data.augment import RandomLoadText
+    from ultralytics.utils.instance import Instances
+
+    labels = {
+        "texts": [["人"], ["未戴安全帽的人"], ["未穿反光衣的人"]],
+        "cls": np.array([[0]], dtype=np.int64),
+        "cls_multihot": np.array([[1.0, 1.0, 0.0]], dtype=np.float32),
+        "instances": Instances(np.array([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32), normalized=True),
+    }
+    loader = RandomLoadText(max_samples=3, padding=True, padding_value=[""], neg_samples=(3, 3))
+    out = loader(labels)
+    texts = [t if isinstance(t, str) else t[0] for t in out["texts"]]
+    mh = out["cls_multihot"][0]
+    assert mh[texts.index("人")] == 1
+    assert mh[texts.index("未戴安全帽的人")] == 1
+    assert mh[texts.index("未穿反光衣的人")] == 0
+
+
+def test_wedetect_validator_forces_multi_label():
+    """Train-val and standalone ``model.val()`` both use WeDetectValidator with multi_label on."""
+    import inspect
+
+    from ultralytics.models.yolo.wedetect.val import WeDetectUniValidator, WeDetectValidator
+
+    args = {"model": "yolo26n.pt", "data": "coco8.yaml"}
+    v = WeDetectValidator(args=args)
+    assert v.args.multi_label is True
+    assert "multi_label=True" in inspect.getsource(WeDetectValidator.postprocess)
+    uni = WeDetectUniValidator(args=args)
+    assert uni.args.multi_label is True
+
+
+def test_prepare_prompts_on_autobackend_like_wrapper():
+    """Standalone model.val() wraps WeDetect in AutoBackend; init_metrics must still encode prompts."""
+    from torch import nn
+
+    from ultralytics.models.yolo.wedetect.val import prepare_wedetect_text_prompts
+
+    class Inner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.names = {0: "object"}
+            self.txt_feats = None
+            self.prompts = None
+
+        def set_classes(self, text, batch=80, cache_clip_model=True):
+            self.prompts = list(text)
+            self.names = dict(enumerate(text))
+
+    class Backend:
+        def __init__(self, model):
+            self.model = model
+            self.names = {0: "object"}
+
+    class Wrapper(nn.Module):
+        def __init__(self, backend):
+            super().__init__()
+            self.backend = backend
+
+        def __getattr__(self, name):
+            if "backend" in self.__dict__ and hasattr(self.backend, name):
+                return getattr(self.backend, name)
+            return super().__getattr__(name)
+
+    inner = Inner()
+    wrapper = Wrapper(Backend(inner))
+    names = ["人", "未戴安全帽的人", "未穿反光衣的人"]
+    prepare_wedetect_text_prompts(wrapper, names)
+    assert inner.prompts == names
+    assert list(wrapper.names.values()) == names
+    assert list(wrapper.backend.names.values()) == names
+
+
+def test_resolve_class_texts_not_truncated_when_ktw_auto_names(tmp_path: Path):
+    """Placeholder nc=1 must not keep only the first class_texts row for ktw-anno val."""
+    from ultralytics.models.yolo.wedetect.val import resolve_wedetect_class_names
+
+    texts = tmp_path / "class_texts.json"
+    texts.write_text(json.dumps([["人"], ["未戴安全帽的人"], ["未穿反光衣的人"]], ensure_ascii=False), encoding="utf-8")
+    data = {
+        "names": {0: "object"},
+        "nc": 1,
+        "class_texts": str(texts),
+        "_ktw_auto_names": True,
+    }
+    assert resolve_wedetect_class_names(data) == ["人", "未戴安全帽的人", "未穿反光衣的人"]
+
+
+def test_mixed_val_yaml_paths_from_dict_and_file(tmp_path: Path):
+    """Standalone val / final_eval must see every mixed val.yolo_data entry, not only [0]."""
+    from ultralytics.models.yolo.wedetect.val import mixed_val_yaml_paths
+
+    data = {"train": {"yolo_data": ["a.yaml"]}, "val": {"yolo_data": ["lvis.yaml", "test_datasets/data.yaml"]}}
+    assert mixed_val_yaml_paths(data) == ["lvis.yaml", "test_datasets/data.yaml"]
+    p = tmp_path / "mixed.yaml"
+    p.write_text("train:\n  yolo_data: [a.yaml]\nval:\n  yolo_data:\n    - lvis.yaml\n    - ppe.yaml\n", encoding="utf-8")
+    assert mixed_val_yaml_paths(p) == ["lvis.yaml", "ppe.yaml"]
+    assert mixed_val_yaml_paths("test_datasets/data.yaml") == []

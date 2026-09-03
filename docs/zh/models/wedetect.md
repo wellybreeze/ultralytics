@@ -22,7 +22,7 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 - **文本当 ID：** 用 `class_texts` / `set_classes` 提示词对齐区域特征，不要求各数据集本地 `class_id` 一致。
 - **多语文本塔：** Tiny / Base / Uni 配 [XLM-RoBERTa-base](https://huggingface.co/FacebookAI/xlm-roberta-base)；Large / XLarge 配 [XLM-RoBERTa-large](https://huggingface.co/FacebookAI/xlm-roberta-large)。推荐中文同义组。详见[语言塔](#语言塔)。
 - **开放词汇微调：** `freeze_text_encoder=False` 时在线编码并更新 LM（`lr0 * text_lr_mult`）；闭集可冻结 LM 或 `close_set=True`。
-- **原生 Ultralytics 管线：** `WeDetect` 门面、`WeDetectModel`、YOLO 格式数据、混数多 val、训练前伪标签，以及 dual ONNX/TensorRT 导出。
+- **原生 Ultralytics 管线：** `WeDetect` 门面、`WeDetectModel`、YOLO 或 **ktw-anno JSON**（一框多标签 PPE，见 [OV 微调 §3.7](../guides/wedetect-ov-finetune.md)）、混数多 val、训练前伪标签，以及 dual ONNX/TensorRT 导出。
 - **多尺度覆盖：** Tiny / Base / Large（以及 YAML 中的 XLarge、WeDetect-Uni）。
 
 ## 模型库
@@ -180,7 +180,9 @@ set_classes([...]).predict(...)
 
 ### 验证与 fitness
 
-- **单集：** 用 `class_texts` 前 `nc` 行（或 `names`）编码提示词后评测。
+- **单集：** 用 `class_texts` 前 `nc` 行（或 `names`）编码提示词后评测。ktw-anno 一框多标签见 [OV 微调教程 §3.7](../guides/wedetect-ov-finetune.md)。
+- **验证 NMS：** 训练中每个 epoch 的 val、`final_eval` 与独立 `model.val()` 均强制 `multi_label=True`（`nc>1` 时同一框可保留多类）。
+- **预测 NMS：** `WeDetectPredictor` 在 `nc>1` 时同样打开 `multi_label=True`（`default.yaml` 的 `False` 对 WeDetect 预测不生效）。
 - **混数 `val.yolo_data`：** 每个 epoch 切换 `nc` / `names` / `class_texts` 并重建 dataloader。LVIS 自动优先 `minival`。
 
 | 列                           | 含义                                       |
@@ -189,7 +191,7 @@ set_classes([...]).predict(...)
 | `<数据集>/metrics/...`       | 该子集自己的指标                           |
 | 无前缀 `fitness`             | 各集 mAP50-95 **加权平均**，决定 `best.pt` |
 
-`val_fitness_dynamic=true` 时：epoch 1 用 YAML `val_fitness_weights`；之后按上一轮 mAP 调权。含 LVIS 时，LVIS 目标 = `val_fitness_lvis_target_mult ×` 客户子集均值（默认 2.0）。
+`val_fitness_weights` 与 `val.yolo_data` 同序；`val_fitness_dynamic: false`（默认）时**全程**用这组权重选 `best.pt`。`true` 时仅 epoch 1 用静态权重，之后按上一轮 mAP 调权。含 LVIS 时，LVIS 目标 = `val_fitness_lvis_target_mult ×` 客户子集均值（`default.yaml` 为 2.0）。LVIS 远低于客户集时，动态权重可能让综合 `fitness` 在 epoch 1 封顶，客户属性类还没学会就被锁进 `best.pt`。客户微调保持 `false`，用静态权重表达偏好。混数 YAML 优先于 CLI；以日志 `dynamic=on|off` 为准，不要只看 `args.yaml`。
 
 ### 伪标签
 

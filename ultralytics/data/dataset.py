@@ -442,6 +442,10 @@ class YOLODataset(BaseDataset):
         """Closed-set detect/segment drop unknown ktw strings; WeDetect OV may append them."""
         return False
 
+    def _ktw_train_multihot(self) -> bool:
+        """Closed-vocab WeDetect train uses one box + multi-hot; YOLO detect keeps one-tag sampling."""
+        return False
+
     def _apply_ktw_auto_names(self, labels: list[dict]) -> None:
         """Infer names from ktw-anno JSON when the data YAML omitted ``names`` / ``nc``.
 
@@ -543,6 +547,9 @@ class YOLODataset(BaseDataset):
         if getattr(self, "ktw_open", False) and self.augment:
             self._apply_ktw_open_sampling(label, raw, bboxes, segments, keypoints, n)
             return
+        if self._ktw_train_multihot():
+            self._apply_ktw_multihot_sampling(label, raw, bboxes, segments, keypoints, n)
+            return
         groups = self._instance_label_groups()
         text_to_id = self._cache_name_to_id()
         n_groups = len(groups)
@@ -585,6 +592,81 @@ class YOLODataset(BaseDataset):
         idx = np.asarray(keep_i)
         label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
         label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        if extras:
+            label["_extra_texts"] = extras
+
+    def _apply_ktw_multihot_sampling(self, label: dict, raw: list, bboxes, segments, keypoints, n: int) -> None:
+        """Keep one physical box and a [N, C] multi-hot so co-labels are not TAL/one-hot negatives."""
+        groups = self._instance_label_groups()
+        text_to_id = self._cache_name_to_id()
+        n_groups = len(groups)
+        allow = self._allow_unknown_instance_labels()
+        extra_index: dict[str, int] = {}
+        extras: list[list[str]] = []
+        parsed: list[tuple[int, list[int], list[str]]] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            in_ids: list[int] = []
+            extra_names: list[str] = []
+            for t in cands:
+                cid = text_to_id.get(t, text_to_id.get(t.lower()))
+                if cid is None:
+                    if not allow:
+                        continue
+                    extra_names.append(t)
+                    if t not in extra_index:
+                        extra_index[t] = len(extras)
+                        extras.append([t])
+                    continue
+                in_ids.append(int(cid))
+            if not in_ids and not extra_names:
+                continue
+            parsed.append((i, in_ids, extra_names))
+        n_cols = n_groups + len(extras)
+        keep_i: list[int] = []
+        keep_cls: list[int] = []
+        keep_mh: list[np.ndarray] = []
+        person = text_to_id.get("人", text_to_id.get("人".lower()))
+        for i, in_ids, extra_names in parsed:
+            mh = np.zeros(n_cols, dtype=np.float32)
+            for cid in in_ids:
+                mh[cid] = 1
+            for t in extra_names:
+                mh[n_groups + extra_index[t]] = 1
+            if person is not None and int(person) < n_cols and mh[int(person)] > 0:
+                primary = int(person)
+            elif in_ids:
+                primary = in_ids[0]
+            else:
+                primary = n_groups + extra_index[extra_names[0]]
+            keep_i.append(i)
+            keep_cls.append(primary)
+            keep_mh.append(mh)
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            label["cls_multihot"] = np.zeros((0, n_cols), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            return
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        label["cls_multihot"] = np.stack(keep_mh, 0)
         if isinstance(segments, list) and segments:
             label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
         elif isinstance(segments, np.ndarray) and len(segments):
@@ -696,6 +778,33 @@ class YOLODataset(BaseDataset):
             (dict): Collated batch with stacked tensors.
         """
         new_batch = {}
+        if any("cls_multihot" in b for b in batch):
+            widths = [int(b["cls_multihot"].shape[-1]) for b in batch if "cls_multihot" in b]
+            c_dim = max(widths) if widths else 0
+            for b in batch:
+                mh = b.get("cls_multihot")
+                cls = b["cls"]
+                n = int(cls.shape[0])
+                if mh is None:
+                    if isinstance(cls, torch.Tensor):
+                        mh = cls.new_zeros((n, c_dim))
+                        if n and c_dim:
+                            ids = cls.view(-1).long().clamp(0, c_dim - 1)
+                            mh[torch.arange(n, device=cls.device), ids] = 1
+                    else:
+                        mh = np.zeros((n, c_dim), dtype=np.float32)
+                        if n and c_dim:
+                            ids = np.asarray(cls).reshape(-1).astype(int)
+                            valid = (ids >= 0) & (ids < c_dim)
+                            mh[np.flatnonzero(valid), ids[valid]] = 1
+                    b["cls_multihot"] = mh
+                elif int(mh.shape[-1]) < c_dim:
+                    if isinstance(mh, torch.Tensor):
+                        pad = mh.new_zeros(mh.shape[0], c_dim - mh.shape[-1])
+                        b["cls_multihot"] = torch.cat([mh, pad], 1)
+                    else:
+                        pad = np.zeros((mh.shape[0], c_dim - mh.shape[-1]), dtype=np.float32)
+                        b["cls_multihot"] = np.concatenate([mh, pad], 1)
         batch = [dict(sorted(b.items())) for b in batch]  # make sure the keys are in the same order
         keys = batch[0].keys()
         values = list(zip(*[list(b.values()) for b in batch]))
@@ -705,7 +814,7 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "cls_multihot", "segments", "obb"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         if "batch_idx" in new_batch:
@@ -892,6 +1001,10 @@ class YOLOMultiModalDataset(YOLODataset):
     def _allow_unknown_instance_labels(self) -> bool:
         """Append instance-specific phrases not in the vocab as extra per-image texts (WeDetect OV)."""
         return True
+
+    def _ktw_train_multihot(self) -> bool:
+        """Fixed class_texts/names: supervise every tag on the box; nameless OV keeps per-box sampling."""
+        return bool(self.augment) and not bool(getattr(self, "ktw_open", False))
 
     def _load_class_texts(self, data: dict) -> list[list[str]] | None:
         """Load class texts from external JSON file or return None to use data.names fallback.

@@ -42,12 +42,16 @@ Place official checkpoints under `pretrained_weights/` (`wedetect_tiny.pt` / `we
 
 ## Data
 
-YOLO detect txt (`cls x y w h`, normalized). `class_texts` is `list[list[str]]`:
+YOLO detect txt (`cls x y w h`, normalized), **or** same-stem **ktw-anno** JSON under `labels/{train,val}/` (JSON is used only when the matching `.txt` is absent). `class_texts` is `list[list[str]]`:
 
 - Rows `0 .. nc-1` match annotated classes; extra rows are train-only negatives.
-- Synonyms may share a row; attributes (color, hat) must not share a row with the base class.
+- Synonyms may share a row; attributes (color, hat, vest) must not share a row with the base class.
 
-Single-dataset example: `ultralytics/cfg/datasets/wedetect_coco.yaml`. Mixed: `wedetect_mixed.yaml` / `wedetect_mixed_customer.yaml` (`train.yolo_data` + `val.yolo_data`). Grounding uses a full COCO-style JSON (`caption` + `tokens_positive`), not JSONL.
+**ktw-anno one-box multi-label (PPE):** one physical person = one rectangle + a `labels` string list. Correct examples: `["人"]`, `["人","未戴安全帽的人"]`, all three on. Always keep `人` on hat/vest-violation boxes. Do **not** duplicate the same xyxy as separate single-class boxes.
+
+Closed-vocab WeDetect train keeps one box with `cls_multihot` and TAL `gt_multi_hot`. Val expands each box into per-class GT for mAP. Epoch val, `final_eval`, and standalone `model.val()` all use `WeDetectValidator` with **`multi_label=True`** (class-wise NMS; co-located classes can all survive when `nc>1`). YAML may omit `names`/`nc`; val names are inferred from unique JSON tags in that split.
+
+Single-dataset example: `ultralytics/cfg/datasets/wedetect_coco.yaml`. Mixed: `wedetect_mixed.yaml` / `wedetect_mixed_customer.yaml` (`train.yolo_data` + `val.yolo_data`). Grounding uses a full COCO-style JSON (`caption` + `tokens_positive`), not JSONL. Step-by-step Chinese data layout: [`docs/zh/guides/wedetect-ov-finetune.md`](../../zh/guides/wedetect-ov-finetune.md) §3.7.
 
 ## Train
 
@@ -88,7 +92,9 @@ Original `labels/` and source `class_texts` JSON are never modified. Merged labe
 
 ## Val and `fitness`
 
-Each mixed val set is scored with its own prompts. Unprefixed `metrics/*` copy the **first** YAML val set. Unprefixed `fitness` is the weighted average that selects `best.pt`. Enable `val_fitness_dynamic` so epoch 2+ reweights from previous mAP50-95; LVIS target = `val_fitness_lvis_target_mult ×` mean customer mAP.
+Each mixed val set is scored with its own prompts at every epoch and again at train-end `final_eval`. Unprefixed `metrics/*` copy the **first** YAML val set. Unprefixed `fitness` is the weighted average that selects `best.pt`. `val_fitness_weights` (same order as `val.yolo_data`) apply **every epoch** when `val_fitness_dynamic` is `false` (default). Dynamic mode uses those weights on epoch 1 only, then reweights from prior mAP50-95; LVIS target = `val_fitness_lvis_target_mult ×` mean customer mAP. If LVIS is far below the customer set, dynamic weights can freeze `best.pt` at epoch 1 before domain attributes are learned — keep it off for small-domain fine-tunes. Mixed-yaml keys override CLI; trust the train log `dynamic=on|off`, not `args.yaml`. Pass the mixed yaml to `model.val(...)` to score every `val.yolo_data` entry. Read `<dataset>/` columns for PPE.
+
+WeDetect epoch validation, `final_eval`, and standalone `model.val()` all run `WeDetectValidator` with **`multi_label=True`**. Mixed `val.yolo_data` is scored **per subset** (not only the first yaml). For ktw-anno PPE, GT is expanded per class; NMS is class-wise so `人` and `未戴安全帽的人` can remain on the same box.
 
 ## Predict and export
 
@@ -107,7 +113,7 @@ Use `export_mode=dual` for swappable prompts (`onnx` / `engine` / `torchscript`)
 
 ## Checklist
 
-- [ ] `class_id` aligns with the first `nc` `class_texts` rows
+- [ ] `class_id` aligns with the first `nc` `class_texts` rows (or ktw-anno: one box, full `labels` list; no duplicate xyxy)
 - [ ] `cfg=wedetect_finetune.yaml` and `freeze_text_encoder=False`
 - [ ] `best.pt` contains non-empty `text_model_weights`
 - [ ] Mixed `fitness` (not unprefixed LVIS mAP) is the number you track for `best.pt`

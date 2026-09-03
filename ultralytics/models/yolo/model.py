@@ -607,6 +607,15 @@ class WeDetect(Model):
         if isinstance(self.model, torch.nn.Module) and not getattr(self.model, "names", None):
             self.model.names = YAML.load(ROOT / "cfg/datasets/coco8.yaml").get("names")
 
+    def val(self, validator=None, **kwargs):
+        """Validate; mixed ``val.yolo_data`` runs every subset (not only the first)."""
+        custom = {"rect": True}
+        args = {**self.overrides, **custom, **kwargs, "mode": "val"}
+        validator = (validator or self._smart_load("validator"))(args=args, _callbacks=self.callbacks)
+        validator(model=self.model)
+        self.metrics = getattr(validator, "mixed_metrics", None) or validator.metrics
+        return self.metrics
+
     def set_classes(self, classes: list[str]) -> None:
         """Set open-vocabulary class prompts for detection.
 

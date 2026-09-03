@@ -77,6 +77,7 @@ class WeDetectTrainer(DetectionTrainer):
             overrides["freeze_text_encoder"] = True
         self.training_data = None  # filled by get_dataset() for mixed yaml
         self.validation_data = None  # path -> data dict for mixed multi-val
+        self.validation_sets = None  # list[(val_img_path, data_dict)]; keeps duplicate paths
         self._val_fitness_weights_cfg = None  # optional list from mixed yaml
         self._val_fitness_dynamic = False  # epoch 2+ reweight by prior val mAP50-95
         self._val_fitness_lvis_target_mult = 2.0
@@ -295,6 +296,7 @@ class WeDetectTrainer(DetectionTrainer):
                 data = super().get_dataset()
                 self.training_data = None
                 self.validation_data = None
+                self.validation_sets = None
                 self.data = data  # required before pseudo-label hook
                 with torch_distributed_zero_first(LOCAL_RANK):
                     maybe_build_pseudo_labels(self)
@@ -307,6 +309,7 @@ class WeDetectTrainer(DetectionTrainer):
         data = super().get_dataset()
         self.training_data = None
         self.validation_data = None
+        self.validation_sets = None
         self.data = data  # required before pseudo-label hook
         with torch_distributed_zero_first(LOCAL_RANK):
             maybe_build_pseudo_labels(self)
@@ -399,12 +402,18 @@ class WeDetectTrainer(DetectionTrainer):
 
         # Per-val metadata (multi-val); fitness combines all sets (equal weights by default)
         self.validation_data = {}
-        for d, vpath in zip(data["val"], final_data["val"]):
+        self.validation_sets = []
+        val_yamls = list((data_yaml.get("val") or {}).get("yolo_data") or [])
+        for i, (d, vpath) in enumerate(zip(data["val"], final_data["val"])):
             if self.args.single_cls:
                 d = dict(d)
                 d["names"] = {0: "object"}
                 d["nc"] = 1
-            self.validation_data[str(vpath)] = d
+            if not d.get("yaml_file") and i < len(val_yamls):
+                d["yaml_file"] = str(val_yamls[i])
+            vpath = str(vpath)
+            self.validation_sets.append((vpath, d))
+            self.validation_data[vpath] = d
         # Optional per-set weights from mixed yaml: val_fitness_weights: [0.5, 0.3, 0.2]
         self._val_fitness_weights_cfg = data_yaml.get("val_fitness_weights")
         self._val_fitness_dynamic = bool(
@@ -473,7 +482,7 @@ class WeDetectTrainer(DetectionTrainer):
             if use_neg:
                 d["use_neg_queue"] = True
             self.training_data[d["train"]] = d
-        n_val = len(self.validation_data)
+        n_val = len(self.validation_sets or self.validation_data or {})
         w = self._val_fitness_weights(n_val)
         dyn = f", dynamic={'on' if self._val_fitness_dynamic else 'off'}" if n_val > 1 else ""
         LOGGER.info(
@@ -574,7 +583,7 @@ class WeDetectTrainer(DetectionTrainer):
 
         from ultralytics.utils import LOCAL_RANK
 
-        val_items = list(self.validation_data.items()) if self.validation_data else []
+        val_items = self._val_items()
         if len(val_items) <= 1:
             return super().validate()
 
@@ -661,14 +670,31 @@ class WeDetectTrainer(DetectionTrainer):
             self._update_dynamic_val_fitness_weights(fitnesses, val_vdata)
         return metrics_all, combined
 
+    def _val_items(self) -> list[tuple[str, dict]]:
+        """Mixed val subsets in yaml order. List form keeps two sets that share an image path."""
+        sets = getattr(self, "validation_sets", None)
+        if sets:
+            return list(sets)
+        return list((self.validation_data or {}).items())
+
+    def _mixed_val_yaml_paths(self) -> list[str]:
+        """Source of truth for train-end / standalone mixed val: ``val.yolo_data``."""
+        from ultralytics.models.yolo.wedetect.val import mixed_val_yaml_paths
+
+        paths = mixed_val_yaml_paths(self.args.data)
+        if paths:
+            return paths
+        return [str(v.get("yaml_file")) for _, v in self._val_items() if v.get("yaml_file")]
+
     def final_eval(self):
         """Final val on ``best.pt`` across all mixed val sets (weighted fitness).
 
         During training ``get_dataset`` replaces ``args.data`` with the mixed yaml
         dict. Standalone ``validator(model=best.pt)`` needs concrete yaml paths.
         """
-        val_items = list(self.validation_data.items()) if self.validation_data else []
-        if len(val_items) <= 1:
+        yaml_paths = self._mixed_val_yaml_paths()
+        val_items = self._val_items()
+        if len(yaml_paths) <= 1 and len(val_items) <= 1:
             data = self.args.data
             if isinstance(data, dict):
                 val = None
@@ -684,6 +710,15 @@ class WeDetectTrainer(DetectionTrainer):
                         self.data if isinstance(getattr(self, "data", None), dict) else {}
                     )
             return super().final_eval()
+
+        if len(yaml_paths) > 1:
+            aligned = []
+            for i, p in enumerate(yaml_paths):
+                vp, vd = val_items[i] if i < len(val_items) else (str(p), {})
+                vd = dict(vd) if vd else {}
+                vd.setdefault("yaml_file", str(p))
+                aligned.append((vp, vd))
+            val_items = aligned
 
         model = self._strip_train_checkpoints()
         if not model:

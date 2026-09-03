@@ -390,6 +390,31 @@ class v8DetectionLoss:
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
+    def _pad_cls_multihot(self, batch: dict[str, Any], batch_size: int, max_gt: int, ncls: int) -> torch.Tensor | None:
+        """Pad collated ``cls_multihot`` to ``[B, max_gt, ncls]`` aligned with ``gt_labels``.
+
+        Missing or empty multi-hot returns None so TAL stays one-hot for every other algorithm.
+        """
+        mh = batch.get("cls_multihot")
+        if mh is None or not torch.is_tensor(mh) or mh.numel() == 0 or max_gt == 0:
+            return None
+        mh = mh.to(self.device)
+        if mh.ndim == 1:
+            mh = mh.unsqueeze(-1)
+        if mh.shape[-1] < ncls:
+            mh = torch.cat([mh, mh.new_zeros(mh.shape[0], ncls - mh.shape[-1])], 1)
+        elif mh.shape[-1] > ncls:
+            mh = mh[:, :ncls]
+        idx = batch["batch_idx"].view(-1).long().to(self.device)
+        out = mh.new_zeros(batch_size, max_gt, mh.shape[-1])
+        nl = mh.shape[0]
+        offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=self.device)
+        offsets.scatter_add_(0, idx + 1, torch.ones_like(idx))
+        offsets = offsets.cumsum(0)
+        within_idx = torch.arange(nl, device=self.device) - offsets[idx]
+        out[idx, within_idx] = mh
+        return out
+
     def bbox_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
         if self.use_dfl:
@@ -442,6 +467,7 @@ class v8DetectionLoss:
             gt_labels,
             gt_bboxes,
             mask_gt,
+            self._pad_cls_multihot(batch, batch_size, gt_labels.shape[1], ncls),
         )
 
         target_scores_sum = max(target_scores.sum(), 1)

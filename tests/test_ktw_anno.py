@@ -517,6 +517,25 @@ def test_wedetect_validator_forces_multi_label():
     assert uni.args.multi_label is True
 
 
+def test_wedetect_final_eval_does_not_auto_enable_lvis_json():
+    """Standalone / train-end val must not flip save_json on for LVIS (771MB JSON + coco-eval OOM)."""
+    from types import SimpleNamespace
+
+    from ultralytics.models.yolo.wedetect.val import WeDetectValidator
+
+    v = WeDetectValidator(args={"model": "yolo26n.pt", "data": "coco8.yaml", "save_json": False, "val": True})
+    v.training = False
+    v.data = {"val": "/datasets/lvis/images/val2017"}
+    model = SimpleNamespace(names={0: "object"}, end2end=False)
+    v.init_metrics(model)
+    assert v.is_lvis is True
+    assert v.args.save_json is False
+
+    v.args.save_json = True
+    v.init_metrics(model)
+    assert v.args.save_json is True
+
+
 def test_prepare_prompts_on_autobackend_like_wrapper():
     """Standalone model.val() wraps WeDetect in AutoBackend; init_metrics must still encode prompts."""
     from torch import nn

@@ -310,14 +310,17 @@ class WeDetectValidator(DetectionValidator):
             model.names, model.txt_feats, model.model[-1].nc = state
 
     def init_metrics(self, model: torch.nn.Module) -> None:
-        """Align ktw-anno val prompts to JSON-inferred names before building the confusion matrix."""
+        """Align ktw-anno val prompts; keep ``save_json=False`` (no auto LVIS/COCO JSON)."""
         ds = getattr(getattr(self, "dataloader", None), "dataset", None)
         data = getattr(ds, "data", None) or self.data
         names = ktw_realign_val_names(data, getattr(model, "names", None))
         if names:
             prepare_wedetect_text_prompts(model, names, device=self.device)
             LOGGER.info(f"WeDetect val prompts ({len(names)}): {names[:8]}{'...' if len(names) > 8 else ''}")
+        want_json = bool(self.args.save_json)
         super().init_metrics(model)
+        if not want_json:
+            self.args.save_json = False
 
 
 class WeDetectUniValidator(DetectionValidator):

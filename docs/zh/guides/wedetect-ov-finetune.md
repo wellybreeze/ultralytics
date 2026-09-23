@@ -538,7 +538,7 @@ pseudo_label_imgsz: 1280 # 默认 640；可与训练 imgsz=1280 相同或更小
 4. **原负类行**：超出 `nc` 的 `class_texts` 行接到伪标段之后（与已接纳伪标无同义重叠），仅作 OV 负样本，不增加 `nc`
 5. **写出**：`new_texts = GT前缀 + kept_zh + leftover负类` → 旁路 `<stem>_train.json`（如 `vehicle_txt_train.json`）；无 `class_texts` 时新建 `path/class_texts_train.json`。原 JSON **不修改**
 
-框合并：伪框 `cls` 已是 `nc_gt+k` 时与 GT 直接拼接；**仅类别级去重，无 IoU 空间抑制**。混数时每个 train 子集各自写出自己的 `*_train.json` 与两份 cache。
+框合并：非 ktw 数据集仍是伪框 `cls`（`nc_gt+k`）与 GT 直接拼接，**仅类别级去重，无 IoU 空间抑制**。ktw-anno 在拼接后把 **IoU > 0.7** 的框收成一个物理框，`instance_labels` 取并集（一框多标）；簇内优先保留面积最大的 GT 框。混数时每个 train 子集各自写出自己的 `*_train.json` 与两份 cache。
 
 val：仍 `labels_dir=labels`，指标按原 `names/nc`。若旁路 `*_train.json` 已存在，加载数据集时会**自动优先**用它作为 `class_texts`（yaml 可仍写原路径）。
 

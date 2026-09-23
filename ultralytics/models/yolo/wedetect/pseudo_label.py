@@ -48,6 +48,8 @@ PORTABLE_HASH_MODE = "rel_v1"
 PSEUDO_FLUSH_EVERY = 200
 # Prefetch this many loader batches ahead of GPU inference (YOLO / WeDetect / D-FINE)
 PSEUDO_PREFETCH_BATCHES = 2
+# ktw-anno: boxes with IoU strictly above this become one box with the union of labels
+KTW_PSEUDO_MERGE_IOU = 0.7
 
 # Dataset-yaml keys (per-subset). Resolution: data[key] > train args > defaults.
 PSEUDO_CFG_KEYS = (
@@ -414,6 +416,29 @@ def collect_image_files(img_path: str | Path) -> list[str]:
 
 def _is_sam3(model: str) -> bool:
     return "sam3" in Path(model).stem.lower()
+
+
+def teacher_vocab_groups(
+    model_path: str,
+    classes_arg: str,
+    texts_arg: str,
+) -> tuple[list[list[str]], list[list[str]], str]:
+    """Load the teacher vocabulary paired with ``pseudo_label_class_texts``.
+
+    WeDetect with an empty ``pseudo_label_classes`` prompts from every row of the text file. Other teachers still align
+    an English class file (default COCO names) to that file by row, and the shorter file truncates the pair.
+
+    Returns:
+        (en_groups, zh_groups, classes identity stored in the pseudo cache hash).
+    """
+    zh_groups = load_text_groups(texts_arg, DEFAULT_CLASS_TEXTS)
+    if _is_wedetect_ckpt(model_path) and not str(classes_arg or "").strip():
+        LOGGER.info(
+            f"{colorstr('WeDetect pseudo:')} WeDetect teacher uses pseudo_label_class_texts only ({len(zh_groups)} rows)"
+        )
+        return [list(g) for g in zh_groups], zh_groups, "zh_only"
+    en_groups = load_text_groups(classes_arg, DEFAULT_CLASSES)
+    return en_groups, zh_groups, classes_arg or str(DEFAULT_CLASSES)
 
 
 def _is_wedetect_ckpt(model: str) -> bool:
@@ -1129,6 +1154,7 @@ def _meta_hash(
     new_texts: list[list[str]],
     imgsz: int,
     root: Path | None = None,
+    dedup: str = "class_only",
 ) -> str:
     payload = {
         "im": portable_paths_hash(im_files, root),
@@ -1141,7 +1167,7 @@ def _meta_hash(
         "conf": float(conf),
         "imgsz": int(imgsz),
         "new_texts": _texts_hash(new_texts),
-        "dedup": "class_only",
+        "dedup": dedup,
         "pipeline": PSEUDO_CACHE_PIPELINE,
         "path_mode": PORTABLE_HASH_MODE,
     }
@@ -1755,35 +1781,225 @@ def generate_pseudo_cache_incremental(
     return _ordered_pseudo_labels(im_files, entries_by_key)
 
 
-def merge_gt_and_pseudo_entries(gt_entries: list[dict], pseudo_entries: list[dict]) -> tuple[list[dict], int]:
-    """Concatenate GT + already-remapped pseudo boxes per image. Returns (merged, n_pseudo_boxes)."""
+def _label_files_are_ktw(gt_label_files: list[str]) -> bool:
+    """True when resolved GT labels are ktw-anno JSON (txt wins when both exist)."""
+    return any(str(p).lower().endswith(".json") for p in gt_label_files)
+
+
+def _dedup_mode(gt_label_files: list[str]) -> str:
+    """Cache identity for spatial merge. ktw-anno uses IoU multi-label; other sets stay class-only."""
+    if _label_files_are_ktw(gt_label_files):
+        return f"ktw_iou_{KTW_PSEUDO_MERGE_IOU}"
+    return "class_only"
+
+
+def _merged_cache_iou_ok(path: Path, dedup: str) -> bool:
+    """ktw-anno merged caches must record the IoU threshold; older class-only caches miss."""
+    if not str(dedup).startswith("ktw_iou_"):
+        return True
+    try:
+        cache = load_dataset_cache_file(path)
+    except Exception:
+        return False
+    return float(cache.get("ktw_iou") or 0) == KTW_PSEUDO_MERGE_IOU
+
+
+def _entries_are_ktw(gt_entries: list[dict]) -> bool:
+    return any(lb.get("instance_labels") for lb in gt_entries)
+
+
+def _xywh_iou_matrix(boxes: np.ndarray) -> np.ndarray:
+    """Pairwise IoU for normalized xywh boxes. Returns (N, N)."""
+    b = np.asarray(boxes, dtype=np.float64)
+    x, y, w, h = b.T
+    x1, y1, x2, y2 = x - w / 2, y - h / 2, x + w / 2, y + h / 2
+    area = np.clip(w, 0, None) * np.clip(h, 0, None)
+    inter_w = np.clip(np.minimum(x2[:, None], x2[None, :]) - np.maximum(x1[:, None], x1[None, :]), 0, None)
+    inter_h = np.clip(np.minimum(y2[:, None], y2[None, :]) - np.maximum(y1[:, None], y1[None, :]), 0, None)
+    inter = inter_w * inter_h
+    union = area[:, None] + area[None, :] - inter
+    return inter / np.maximum(union, 1e-7)
+
+
+def _iou_clusters(iou: np.ndarray, thr: float) -> list[list[int]]:
+    """Connected components of pairs with IoU strictly greater than ``thr``."""
+    n = int(iou.shape[0])
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    ys, xs = np.where(np.triu(iou, 1) > thr)
+    for a, b in zip(ys.tolist(), xs.tolist()):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return [groups[k] for k in sorted(groups, key=lambda r: groups[r][0])]
+
+
+def _cls_text(cid: int, class_texts: list[list[str]] | None) -> list[str]:
+    """Canonical label string for a class id (first synonym in the merged vocabulary)."""
+    if class_texts and 0 <= cid < len(class_texts):
+        group = [str(t).strip() for t in class_texts[cid] if str(t).strip()]
+        if group:
+            return [group[0]]
+    return [str(cid)]
+
+
+def _per_box_texts(
+    cls: np.ndarray,
+    n_gt: int,
+    gt_inst: list | None,
+    class_texts: list[list[str]] | None,
+) -> list[list[str]]:
+    """Per-box label strings: ktw-anno tags for GT, vocabulary name for teacher boxes."""
+    texts: list[list[str]] = []
+    for i, cid in enumerate(np.asarray(cls, dtype=np.float32).reshape(-1).tolist()):
+        if gt_inst is not None and i < n_gt and i < len(gt_inst):
+            tags = [str(t).strip() for t in gt_inst[i] if str(t).strip()]
+            texts.append(tags or _cls_text(int(cid), class_texts))
+        else:
+            texts.append(_cls_text(int(cid), class_texts))
+    return texts
+
+
+def _merge_ktw_iou(
+    cls: np.ndarray,
+    boxes: np.ndarray,
+    texts: list[list[str]],
+    n_gt: int,
+    iou_thr: float,
+) -> tuple[np.ndarray, np.ndarray, list[list[str]]]:
+    """Collapse boxes with IoU > ``iou_thr`` into one box; labels are the union.
+
+    Geometry stays on a GT box when the cluster contains one (largest area, then earliest index).
+    Pseudo-only clusters keep the largest box.
+    """
+    n = len(boxes)
+    if n <= 1:
+        return cls, boxes, texts
+    clusters = _iou_clusters(_xywh_iou_matrix(boxes), iou_thr)
+    if len(clusters) == n:
+        return cls, boxes, texts
+    out_cls, out_boxes, out_texts = [], [], []
+    for members in clusters:
+        pool = [i for i in members if i < n_gt] or members
+        areas = boxes[pool, 2] * boxes[pool, 3]
+        rep = pool[int(np.argmax(areas))]
+        seen: set[str] = set()
+        tags: list[str] = []
+        for i in members:
+            for t in texts[i]:
+                if t not in seen:
+                    seen.add(t)
+                    tags.append(t)
+        out_cls.append(np.asarray(cls[rep], dtype=np.float32).reshape(1))
+        out_boxes.append(np.asarray(boxes[rep], dtype=np.float32).reshape(4))
+        out_texts.append(tags or list(texts[rep]))
+    return np.stack(out_cls, 0), np.stack(out_boxes, 0), out_texts
+
+
+def merge_gt_and_pseudo_entries(
+    gt_entries: list[dict],
+    pseudo_entries: list[dict],
+    class_texts: list[list[str]] | None = None,
+    *,
+    ktw: bool | None = None,
+    iou_thr: float = KTW_PSEUDO_MERGE_IOU,
+) -> tuple[list[dict], int]:
+    """Concatenate GT + already-remapped pseudo boxes per image.
+
+    ktw-anno (``instance_labels`` present) additionally merges boxes with IoU > ``iou_thr`` into one physical box
+    whose ``instance_labels`` is the union of the overlapping tags. Other datasets stay class-level concat.
+
+    Returns:
+        (merged entries, n_pseudo_boxes before spatial merge).
+    """
+    if ktw is None:
+        ktw = _entries_are_ktw(gt_entries)
     pseudo_index = _index_by_image(pseudo_entries)
     merged = []
     n_pseudo = 0
+    n_in = n_out = 0
     for gt in gt_entries:
         im = str(gt["im_file"])
         ps = _lookup_label(pseudo_index, im)
         gt_cls = np.asarray(gt["cls"], dtype=np.float32).reshape(-1, 1)
         gt_boxes = np.asarray(gt["bboxes"], dtype=np.float32).reshape(-1, 4)
+        gt_inst = gt.get("instance_labels")
+        n_gt = len(gt_cls)
         if ps is not None and len(ps["cls"]):
             p_cls = np.asarray(ps["cls"], dtype=np.float32).reshape(-1, 1)
             p_boxes = np.asarray(ps["bboxes"], dtype=np.float32).reshape(-1, 4)
             n_pseudo += len(p_cls)
-            cls = np.concatenate([gt_cls, p_cls], 0) if len(gt_cls) else p_cls
+            cls = np.concatenate([gt_cls, p_cls], 0) if n_gt else p_cls
             boxes = np.concatenate([gt_boxes, p_boxes], 0) if len(gt_boxes) else p_boxes
         else:
             cls, boxes = gt_cls, gt_boxes
-        merged.append(
-            _label_entry(
-                im,
-                tuple(gt["shape"]),
-                cls,
-                boxes,
-                segments=list(gt.get("segments") or []),
-                keypoints=gt.get("keypoints"),
-            )
+        segments = list(gt.get("segments") or [])
+        keypoints = gt.get("keypoints")
+        inst = None
+        if ktw and len(cls):
+            n_in += len(cls)
+            texts = _per_box_texts(cls, n_gt, gt_inst, class_texts)
+            cls, boxes, texts = _merge_ktw_iou(cls, boxes, texts, n_gt, iou_thr)
+            inst = texts
+            n_out += len(cls)
+            if len(boxes) != n_gt or (ps is not None and len(ps["cls"])):
+                segments, keypoints = [], None
+        entry = _label_entry(im, tuple(gt["shape"]), cls, boxes, segments=segments, keypoints=keypoints)
+        if inst is not None:
+            entry["instance_labels"] = inst
+        merged.append(entry)
+    if ktw and n_in != n_out:
+        LOGGER.info(
+            f"{colorstr('WeDetect pseudo:')} ktw-anno IoU>{iou_thr} merge: {n_in} boxes -> {n_out} "
+            f"one-box-multi-label boxes"
         )
     return merged, n_pseudo
+
+
+def _resolve_merge_class_texts(data: dict, root: Path | None) -> list[list[str]] | None:
+    """Vocabulary rows used to name teacher class ids when rebuilding a ktw-anno merge."""
+    meta: dict = {}
+    if root is not None:
+        meta_path = root / PSEUDO_META_NAME
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+    candidates: list[Path] = []
+    for raw in (meta.get("class_texts_path"), (data or {}).get("class_texts")):
+        if not raw:
+            continue
+        p = Path(str(raw))
+        candidates.append(p)
+        if root is not None:
+            candidates.append(root / p.name)
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not cand.is_file():
+            continue
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return _as_text_groups(json.load(f))
+        except Exception:
+            continue
+    names = meta.get("names") or (data or {}).get("names")
+    if names:
+        return _as_text_groups(names)
+    return None
 
 
 def build_merged_pseudo_cache(
@@ -1792,13 +2008,20 @@ def build_merged_pseudo_cache(
     gt_entries: list[dict],
     pseudo_entries: list[dict],
     root: Path | None = None,
+    class_texts: list[list[str]] | None = None,
 ) -> dict:
     """Merge GT+pseudo and write ``labels_pseudo_merged.cache``; return cache dict."""
     root = root or _dataset_root(data, im_files)
-    merged_labels, _ = merge_gt_and_pseudo_entries(gt_entries, pseudo_entries)
+    if class_texts is None:
+        class_texts = _resolve_merge_class_texts(data, root)
+    ktw = _entries_are_ktw(gt_entries)
+    merged_labels, _ = merge_gt_and_pseudo_entries(gt_entries, pseudo_entries, class_texts, ktw=ktw)
     path = resolve_merged_cache_path(data, im_files)
     h = merged_cache_hash(im_files, root=root)
-    return save_label_cache(path, merged_labels, h, extra={"path_mode": PORTABLE_HASH_MODE})
+    extra = {"path_mode": PORTABLE_HASH_MODE}
+    if ktw:
+        extra["ktw_iou"] = KTW_PSEUDO_MERGE_IOU
+    return save_label_cache(path, merged_labels, h, extra=extra)
 
 
 def rebuild_merged_pseudo_cache(data: dict, im_files: list[str]) -> dict:
@@ -1903,8 +2126,7 @@ def apply_pseudo_labels_to_subset(
     )
 
     # --- 1) vocabulary ---
-    en_groups = load_text_groups(classes_arg, DEFAULT_CLASSES)
-    zh_groups = load_text_groups(texts_arg, DEFAULT_CLASS_TEXTS)
+    en_groups, zh_groups, classes_key = teacher_vocab_groups(model_path, classes_arg, texts_arg)
     vocab = build_merged_vocabulary(data, en_groups, zh_groups)
     nc_gt = vocab["nc_gt"]
     new_nc = vocab["new_nc"]
@@ -1930,7 +2152,7 @@ def apply_pseudo_labels_to_subset(
     p_hash = _pseudo_only_hash(
         im_files,
         model_path,
-        classes_arg or str(DEFAULT_CLASSES),
+        classes_key,
         texts_arg or str(DEFAULT_CLASS_TEXTS),
         kept_ids,
         conf,
@@ -1938,11 +2160,12 @@ def apply_pseudo_labels_to_subset(
         imgsz,
         root=root,
     )
+    dedup = _dedup_mode([str(p) for p in gt_label_files])
     h = _meta_hash(
         im_files,
         [str(p) for p in gt_label_files],
         model_path,
-        classes_arg or str(DEFAULT_CLASSES),
+        classes_key,
         texts_arg or str(DEFAULT_CLASS_TEXTS),
         str(class_texts_path),
         kept_ids,
@@ -1950,6 +2173,7 @@ def apply_pseudo_labels_to_subset(
         new_texts,
         imgsz,
         root=root,
+        dedup=dedup,
     )
 
     # Full idempotent reuse (portable hash: same relative layout → hit across machines)
@@ -1957,7 +2181,7 @@ def apply_pseudo_labels_to_subset(
         try:
             old = json.loads(meta_path.read_text(encoding="utf-8"))
             on_disk = _as_text_groups(json.loads(class_texts_path.read_text(encoding="utf-8")))
-            merged_ok = try_load_cache(m_cache_path, m_hash) is not None
+            merged_ok = try_load_cache(m_cache_path, m_hash) is not None and _merged_cache_iou_ok(m_cache_path, dedup)
             pc = try_load_cache(p_cache_path, p_hash)
             if pc is not None:
                 remapped_n = len(remap_label_im_files(list(pc.get("labels") or []), im_files, root))
@@ -1992,7 +2216,7 @@ def apply_pseudo_labels_to_subset(
     # --- 4) pseudo-only cache: per-image flush + crash resume ---
     LOGGER.info(
         f"{colorstr('WeDetect pseudo:')} teacher conf={conf}; "
-        f"vocab nc_gt={nc_gt} + pseudo={len(kept_zh)} (batch cache flush, class-level dedup)"
+        f"vocab nc_gt={nc_gt} + pseudo={len(kept_zh)} (batch cache flush, dedup={dedup})"
     )
     pseudo_entries = generate_pseudo_cache_incremental(
         model_path=model_path,
@@ -2015,13 +2239,17 @@ def apply_pseudo_labels_to_subset(
     )
 
     # --- 5) merge -> labels_pseudo_merged.cache ---
-    merged_labels, n_pseudo_boxes = merge_gt_and_pseudo_entries(gt_entries, pseudo_entries)
+    ktw = dedup.startswith("ktw_iou_") or _entries_are_ktw(gt_entries)
+    merged_labels, n_pseudo_boxes = merge_gt_and_pseudo_entries(gt_entries, pseudo_entries, new_texts, ktw=ktw)
+    extra = {"path_mode": PORTABLE_HASH_MODE}
+    if ktw:
+        extra["ktw_iou"] = KTW_PSEUDO_MERGE_IOU
     save_label_cache(
         m_cache_path,
         merged_labels,
         m_hash,
         complete=True,
-        extra={"path_mode": PORTABLE_HASH_MODE},
+        extra=extra,
     )
 
     meta = {
@@ -2029,7 +2257,7 @@ def apply_pseudo_labels_to_subset(
         "model": model_path,
         "conf": conf,
         "imgsz": imgsz,
-        "dedup": "class_only",
+        "dedup": dedup,
         "format": "detect_xywhn",
         "pipeline": PSEUDO_CACHE_PIPELINE,
         "path_mode": PORTABLE_HASH_MODE,

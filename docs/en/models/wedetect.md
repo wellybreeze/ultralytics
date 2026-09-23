@@ -198,7 +198,7 @@ Artifacts (dataset `path` root / first image directory):
 
 Cache hit requires matching meta hash, on-disk `*_train.json`, merged cache, **and** a complete teacher cache whose **version + hash** match. A version bump (for example `1.0.3` → `1.0.4`) misses at `apply_pseudo_labels_to_subset` and re-runs the teacher. `YOLODataset.get_labels()` is more tolerant: hash-matched merged caches can load across versions; if merged cache is gone, it rebuilds from teacher cache + GT **without** re-inference.
 
-Class-level synonym overlap drops colliding teacher classes. Remaining classes append after GT ids. Boxes are concatenated with **no IoU NMS**.
+Class-level synonym overlap drops colliding teacher classes. Remaining classes append after GT ids. Non-ktw boxes are concatenated with **no IoU NMS**. ktw-anno boxes with **IoU > 0.7** collapse to one box and the union of labels.
 
 ### D-FINE as teacher
 

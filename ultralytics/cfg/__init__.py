@@ -195,7 +195,7 @@ QUANTIZE_ALIASES = {
     "w8a16": "w8a16",
     "w8a32": "w8a32",
 }
-QUANTIZE_DOCS_URL = "https://docs.ultralytics.com/modes/export/#quantization-options"
+QUANTIZE_DOCS_URL = "https://docs.ultralytics.com/modes/export#quantization-options"
 QUANTIZE_VALID_VALUES = "8, 16, 32, 'int8', 'fp16', 'fp32', 'w8a8', 'w16a16', 'w8a16', or 'w8a32'"
 
 # Define keys for arg type checks
@@ -225,7 +225,7 @@ CFG_FLOAT_KEYS = frozenset(
     }
 )
 CFG_FRACTION_KEYS = frozenset(
-    {  # fractional floats use [0.0, 1.0], except dataset fraction uses (0.0, 1.0]
+    {  # fractional floats use [0.0, 1.0]; dataset fraction also accepts positive counts and split pairs
         "dropout",
         "lr0",
         "lrf",
@@ -278,7 +278,9 @@ CFG_INT_KEYS = frozenset(
         "pseudo_label_prefetch",
     }
 )
-CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds
+CFG_INT_MIN = {  # minimum valid values for integer arguments used as counts, divisors, sizes or seeds
+    "epochs": 1,
+    "patience": 0,  # 0 disables early stopping
     "nbs": 1,
     "max_det": 1,
     "max_classes": 1,
@@ -321,7 +323,6 @@ CFG_BOOL_KEYS = frozenset(
         "nms",
         "profile",
         "channels_last",
-        "end2end",
         "cls_remap",
         "mix_global_texts",
         "use_neg_queue",
@@ -403,7 +404,7 @@ def get_cfg(
           `project` and `name` to strings and validating configuration keys and values.
         - The function performs type and value checks on the configuration data.
     """
-    cfg = cfg2dict(cfg)
+    cfg = _handle_deprecation(cfg2dict(cfg))
 
     # Merge overrides
     if overrides:
@@ -451,11 +452,13 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
     Notes:
         - The function modifies the input dictionary in-place.
         - None values are ignored as they may be from optional arguments.
-        - Fraction keys use [0.0, 1.0], except dataset fraction, which uses (0.0, 1.0].
+        - Fraction keys use [0.0, 1.0]; dataset fraction also accepts counts and [train, val, test] lists.
     """
     typed_keys = CFG_FLOAT_KEYS | CFG_FRACTION_KEYS | CFG_INT_KEYS | CFG_BOOL_KEYS | CFG_STR_KEYS | {"scale", "compile"}
     for k, v in cfg.items():
-        if v is None and DEFAULT_CFG_DICT.get(k) is not None and k in typed_keys and k != "auto_augment":
+        if v is None and (
+            k == "amp" or (DEFAULT_CFG_DICT.get(k) is not None and k in typed_keys and k != "auto_augment")
+        ):
             raise TypeError(f"'{k}=None' is invalid. '{k}' must not be None.")
         if v is not None:  # None values may be from optional args
             if k in CFG_FLOAT_KEYS and not isinstance(v, FLOAT_OR_INT):
@@ -485,6 +488,17 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
                 if not (0.0 <= v <= 1.0):
                     raise ValueError(f"'{k}={v}' is an invalid value. Valid '{k}' values are between 0.0 and 1.0.")
             elif k in CFG_FRACTION_KEYS:
+                if k == "fraction" and isinstance(v, list):
+                    if (
+                        len(v) not in {2, 3}
+                        or not all(v[:2])
+                        or not all((type(x) is int and x >= 0) or (type(x) is float and 0.0 <= x <= 1.0) for x in v)
+                    ):
+                        raise ValueError(f"'{k}={v}' is invalid. Use [train, val] or [train, val, test] counts/ratios.")
+                    cfg[k] = [float(x) if x in {0, 1} else x for x in v]
+                    continue
+                if k == "fraction" and isinstance(v, bool):
+                    raise TypeError(f"'{k}={v}' is of invalid type bool. Valid '{k}' types are int, float, or list")
                 if not isinstance(v, FLOAT_OR_INT):
                     if hard:
                         raise TypeError(
@@ -492,8 +506,11 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
                             f"Valid '{k}' types are int (i.e. '{k}=0') or float (i.e. '{k}=0.5')"
                         )
                     cfg[k] = v = float(v)
-                if not (0.0 <= v <= 1.0) or (k == "fraction" and v == 0.0):
-                    raise ValueError(f"'{k}={v}' is invalid. Use (0.0, 1.0] for fraction; [0.0, 1.0] otherwise.")
+                valid = 0.0 <= v <= 1.0 or (k == "fraction" and isinstance(v, int) and v > 1)
+                if not valid or (k == "fraction" and v == 0.0):
+                    raise ValueError(f"'{k}={v}' invalid. Use integer count >1 or ratio (0, 1] for fraction.")
+                if k == "fraction" and v == 1:
+                    cfg[k] = 1.0
             elif k in CFG_INT_KEYS:
                 if not isinstance(v, int):
                     if hard:
@@ -521,6 +538,12 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
                         f"'{k}' must be a bool or str (i.e. '{k}=True' or '{k}=max-autotune')"
                     )
                 cfg[k] = bool(v)
+            elif k == "amp":
+                if not isinstance(v, bool) and str(v).lower() not in {"fp16", "bf16", "fp32"}:
+                    raise ValueError(
+                        f"'{k}={v}' is invalid. Valid '{k}' values are True, False, 'fp16', 'bf16', or 'fp32'."
+                    )
+                cfg[k] = v.lower() if isinstance(v, str) else v
             elif k == "quantize":  # canonicalize 8/16/32 or w-notation to a scheme (unset stays None for FP32)
                 scheme = QUANTIZE_ALIASES.get(str(v).lower())
                 if scheme is None:
@@ -596,6 +619,14 @@ def _handle_deprecation(custom: dict) -> dict:
     }
     removed_keys = {"label_smoothing", "save_hybrid", "crop_fraction"}
 
+    if "end2end" in custom:
+        end2end = custom.pop("end2end")
+        if end2end is not None:
+            if not isinstance(end2end, bool):
+                raise TypeError("Deprecated 'end2end' must be a bool.")
+            custom["nms"] = False if end2end else True if custom.get("nms") is True else None
+            deprecation_warn(f"end2end={end2end}", f"nms={custom.get('nms')}")
+
     # Forward the deprecated precision flags onto the unified `quantize` scheme (int8 wins over half). The value is read
     # as a bool so quoted/string 'False' disables it while a bare CLI flag (empty string) enables it; an explicit false
     # flag maps to None to clear any inherited quantize. An explicit `quantize=` always wins over the legacy flags.
@@ -665,7 +696,8 @@ def check_dict_alignment(
             matches = [f"{k}={base[k]}" if base.get(k) is not None else k for k in matches]
             match_str = f"Similar arguments are i.e. {matches}." if matches else ""
             string += f"'{colorstr('red', 'bold', x)}' is not a valid YOLO argument. {match_str}\n"
-        raise SyntaxError(string + CLI_HELP_MSG) from e
+        LOGGER.info(CLI_HELP_MSG)
+        raise SyntaxError(string) from e
 
 
 def merge_equals_args(args: list[str]) -> list[str]:
@@ -739,23 +771,19 @@ def handle_yolo_login(args: list[str]) -> None:
         LOGGER.info(f"Get an API key from {api_key_url} and then run 'yolo login API_KEY'.")
         return
 
-    import requests  # scoped as slow import
+    from ultralytics import APIConnectionError, APIError, Platform
 
     try:
-        response = requests.get(
-            f"{PLATFORM_URL}/api/settings",
-            headers={"Authorization": f"Bearer {args[1]}"},
-            timeout=30,
-        )
-        if response.status_code == 200:
-            SETTINGS["api_key"] = args[1]
-            LOGGER.info("New authentication successful ✅")
-        elif response.status_code == 401:
-            LOGGER.warning("Invalid API key")
-        else:
-            response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        LOGGER.warning(f"Authentication request failed, check your connection: {e}")
+        with Platform(api_key=args[1], base_url=PLATFORM_URL, timeout=30) as client:
+            client.account.summary()
+        SETTINGS["api_key"] = args[1]
+        LOGGER.info("New authentication successful ✅")
+    except APIError as error:
+        raise SystemExit(
+            "Invalid API key" if error.status_code == 401 else f"Authentication failed (HTTP {error.status_code})"
+        ) from None
+    except APIConnectionError as error:
+        raise SystemExit(f"Authentication request failed, check your connection: {error}") from None
 
 
 def handle_yolo_settings(args: list[str]) -> None:
@@ -778,9 +806,9 @@ def handle_yolo_settings(args: list[str]) -> None:
         - The function will check for alignment between the provided settings and the existing ones.
         - After processing, the updated settings will be displayed.
         - For more information on handling YOLO settings, visit:
-          https://docs.ultralytics.com/quickstart/#ultralytics-settings
+          https://docs.ultralytics.com/usage/settings
     """
-    url = "https://docs.ultralytics.com/quickstart/#ultralytics-settings"  # help URL
+    url = "https://docs.ultralytics.com/usage/settings"  # help URL
     try:
         if any(args):
             if args[0] == "reset":
@@ -1052,7 +1080,10 @@ def entrypoint(debug: str = "") -> None:
                 k, v = parse_key_value_pair(a)
                 if k == "cfg" and v is not None:  # custom.yaml passed
                     LOGGER.info(f"Overriding {DEFAULT_CFG_PATH} with {v}")
-                    overrides = {k: val for k, val in YAML.load(checks.check_yaml(v)).items() if k != "cfg"}
+                    overrides = {
+                        **{k: val for k, val in YAML.load(checks.check_yaml(v)).items() if k != "cfg"},
+                        **overrides,
+                    }
                 else:
                     overrides[k] = v
             except (NameError, SyntaxError, ValueError, AssertionError) as e:
@@ -1067,8 +1098,8 @@ def entrypoint(debug: str = "") -> None:
             return
         elif a in DEFAULT_CFG_DICT and isinstance(DEFAULT_CFG_DICT[a], bool):
             overrides[a] = True  # auto-True for default bool args, i.e. 'yolo show' sets show=True
-        elif a in {"half", "int8"}:
-            overrides[a] = True  # deprecated bare precision flags, forwarded to quantize by _handle_deprecation
+        elif a in {"half", "int8", "end2end", "nms"}:
+            overrides[a] = True  # bare boolean flags whose defaults are missing or None
         elif a in DEFAULT_CFG_DICT:
             raise SyntaxError(
                 f"'{colorstr('red', 'bold', a)}' is a valid YOLO argument but is missing an '=' sign "
@@ -1134,9 +1165,9 @@ def entrypoint(debug: str = "") -> None:
 
         model = YOLO(model, task=task)
         if "yoloe" in stem or "world" in stem:
-            cls_list = overrides.pop("classes", DEFAULT_CFG.classes)
-            if cls_list is not None and isinstance(cls_list, str):
-                model.set_classes([c.strip() for c in cls_list.split(",")])  # "person, bus" -> ['person', 'bus']
+            cls_list = overrides.get("classes", DEFAULT_CFG.classes)
+            if isinstance(cls_list, str):  # text prompts, i.e. "person, bus" -> ['person', 'bus']
+                model.set_classes([c.strip() for c in overrides.pop("classes", cls_list).split(",")])
     # Task Update
     if task != model.task:
         if task:
@@ -1152,8 +1183,8 @@ def entrypoint(debug: str = "") -> None:
             "https://ultralytics.com/images/boats.jpg" if task == "obb" else DEFAULT_CFG.source or ASSETS
         )
         LOGGER.warning(f"'source' argument is missing. Using default 'source={overrides['source']}'.")
-    elif mode in {"train", "val"}:
-        if "data" not in overrides and "resume" not in overrides:
+    elif mode == "train":  # val resolves a missing 'data' in Model.val()
+        if overrides.get("data") is None and not overrides.get("resume"):
             overrides["data"] = DEFAULT_CFG.data or TASK2DATA.get(task or DEFAULT_CFG.task, DEFAULT_CFG.data)
             LOGGER.warning(f"'data' argument is missing. Using default 'data={overrides['data']}'.")
     elif mode == "export":

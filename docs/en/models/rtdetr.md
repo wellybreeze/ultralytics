@@ -1,5 +1,5 @@
 ---
-title: RT-DETR: Real-Time Detection Transformer
+title: RT-DETR Real-Time Detection Transformer
 comments: true
 description: Explore Baidu's RT-DETR, a Vision Transformer-based real-time object detector offering high accuracy and adaptable inference speed. Learn more with Ultralytics.
 keywords: RT-DETR, Baidu, Vision Transformer, real-time object detection, PaddlePaddle, Ultralytics, pretrained models, decoder layer index, query count, AI, machine learning, computer vision
@@ -22,7 +22,7 @@ Real-Time Detection Transformer (RT-DETR), developed by Baidu, is a cutting-edge
   <strong>Watch:</strong> How to Use Baidu's RT-DETR for Object Detection | Inference and Benchmarking with Ultralytics  🚀
 </p>
 
-![Baidu RT-DETR model architecture overview](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/baidu-rtdetr-model-overview.avif) **Overview of Baidu's RT-DETR.** The RT-DETR model architecture diagram shows the last three stages of the backbone {S3, S4, S5} as the input to the encoder. The efficient hybrid encoder transforms multiscale features into a sequence of image features through intrascale feature interaction (AIFI) and cross-scale feature-fusion module (CCFM). The IoU-aware query selection is employed to select a fixed number of image features to serve as initial object queries for the decoder. Finally, the decoder with auxiliary prediction heads iteratively optimizes object queries to generate boxes and confidence scores ([source](https://arxiv.org/pdf/2304.08069)).
+![Baidu RT-DETR model architecture overview](https://cdn.ul.run/i/bedb4e3010893ccbbb990ee1709d90db.avif) **Overview of Baidu's RT-DETR.** The RT-DETR model architecture diagram shows the last three stages of the backbone {S3, S4, S5} as the input to the encoder. The efficient hybrid encoder transforms multiscale features into a sequence of image features through intrascale feature interaction (AIFI) and cross-scale feature-fusion module (CCFM). The IoU-aware query selection is employed to select a fixed number of image features to serve as initial object queries for the decoder. Finally, the decoder with auxiliary prediction heads iteratively optimizes object queries to generate boxes and confidence scores ([source](https://arxiv.org/pdf/2304.08069)).
 
 ### Key Features
 
@@ -77,6 +77,10 @@ This example provides simple RT-DETR training and inference examples. For full d
         yolo predict model=rtdetr-l.pt source=path/to/bus.jpg
         ```
 
+!!! tip "Deterministic Training"
+
+    Set `deterministic=False` when training RT-DETR on CUDA with PyTorch 2.0 or later. Its deformable attention uses `F.grid_sample`, which has no deterministic CUDA backward, so `deterministic=True` cannot make the run reproducible and can reduce training throughput. `seed` still controls weight initialization, data order, and augmentation sampling.
+
 !!! tip "Faster Inference Trade-Offs"
 
     RT-DETR pretrained weights support two inference-time settings to reduce latency without retraining:
@@ -104,7 +108,7 @@ This example provides simple RT-DETR training and inference examples. For full d
 
 ## Supported Tasks and Modes
 
-This table presents the model types, the specific pretrained weights, the tasks supported by each model, and the various modes ([Train](../modes/train.md) , [Val](../modes/val.md), [Predict](../modes/predict.md), [Export](../modes/export.md)) that are supported, indicated by ✅ emojis.
+This table presents the model types, the specific pretrained weights, the tasks supported by each model, and the various modes ([Train](../modes/train.md), [Val](../modes/val.md), [Predict](../modes/predict.md), [Export](../modes/export.md)) that are supported, indicated by ✅ emojis.
 
 | Model Type          | Pretrained Weights                                                                        | Tasks Supported                        | Training | Validation | Inference | Export |
 | ------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------- | -------- | ---------- | --------- | ------ |

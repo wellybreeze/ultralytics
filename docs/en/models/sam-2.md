@@ -1,6 +1,6 @@
 ---
 comments: true
-description: Discover SAM 2, the next generation of Meta's Segment Anything Model, supporting real-time promptable segmentation in both images and videos with state-of-the-art performance. Learn about its key features, datasets, and how to use it.
+description: Discover SAM 2, Meta's next-generation Segment Anything Model for real-time promptable segmentation in images and videos. Learn its key features, datasets, and usage.
 keywords: SAM 2, SAM 2.1, SAM-2, Segment Anything, video segmentation, image segmentation, promptable segmentation, zero-shot segmentation, instance segmentation, interactive segmentation, real-time segmentation, SAM 2 vs YOLO, SAM 2 vs SAM 3, SA-V dataset, Meta, Ultralytics
 ---
 
@@ -18,7 +18,7 @@ SAM 2, the successor to Meta's [Segment Anything Model (SAM)](sam.md), is a cutt
 
     SAM 2.1 models power the [smart annotation feature](https://www.ultralytics.com/annotate) on [Ultralytics Platform](https://platform.ultralytics.com), enabling click-based segmentation for fast dataset labeling. See the [annotation guide](../platform/data/annotation.md) for details.
 
-![SAM 2 Example Results](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/sa-v-dataset.avif)
+![SAM 2 Example Results](https://cdn.ul.run/i/28aed60b863ee7f03833312fcd2830e7.avif)
 
 ## Key Features
 
@@ -75,7 +75,7 @@ SAM 2 sets a new benchmark in the field, outperforming previous models on variou
 - **Memory Mechanism**: Includes a memory encoder, memory bank, and memory attention module. These components collectively store and utilize information from past frames, enabling the model to maintain consistent [object tracking](https://www.ultralytics.com/glossary/object-tracking) over time.
 - **Mask Decoder**: Generates the final segmentation masks based on the encoded image features and prompts. In video, it also uses memory context to ensure accurate tracking across frames.
 
-![SAM 2 Architecture Diagram](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/sam2-architecture-diagram.avif)
+![SAM 2 Architecture Diagram](https://cdn.ul.run/i/fef83ae8fd67f9a4461ac0a8fab2582c.avif)
 
 ### Memory Mechanism and Occlusion Handling
 
@@ -232,9 +232,9 @@ SAM 2 can be utilized across a broad spectrum of tasks, including real-time vide
 
 ## Dynamic Interactive Segment and Track
 
-SAM2DynamicInteractivePredictor is an advanced training-free extension of SAM2 that enables dynamic interaction with multiple frames and continual learning capabilities. This predictor supports real-time prompt updates and memory management for improved tracking performance across a sequence of images. Compared to the original SAM2, SAM2DynamicInteractivePredictor rebuilds the inference flow to make the best use of pretrained SAM2 models without requiring additional training.
+`SAM2DynamicInteractivePredictor` is an advanced training-free extension of SAM 2 that enables dynamic interaction with multiple frames and continual learning capabilities. This predictor supports real-time prompt updates and memory management for improved tracking performance across a sequence of images. Compared to the original SAM 2, `SAM2DynamicInteractivePredictor` rebuilds the inference flow to make the best use of pretrained SAM 2 models without requiring additional training.
 
-![SAM 2 Example Results](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/sam2-interactive-sample.avif)
+![SAM 2 Example Results](https://cdn.ul.run/i/3673b03a20f4606445fbbbb6d358ac74.avif)
 
 ### Key Features
 
@@ -294,7 +294,7 @@ It offers three significant enhancements:
 
 !!! note
 
-    The `SAM2DynamicInteractivePredictor` is designed to work with SAM2 models, and support adding/refining categories by all the [box/point/mask prompts](#sam-2-prediction-examples) natively that SAM2 supports. It is particularly useful for scenarios where objects appear or change over time, such as in video annotation or interactive editing tasks.
+    The `SAM2DynamicInteractivePredictor` is designed to work with SAM 2 models, and supports adding and refining categories with all the [box, point, and mask prompts](#sam-2-prediction-examples) that SAM 2 supports natively. It is particularly useful for scenarios where objects appear or change over time, such as in video annotation or interactive editing tasks.
 
 #### Arguments
 
@@ -329,9 +329,9 @@ Here we compare Meta's SAM 2 models, including the smallest SAM2-t variant, with
 | Meta SAM2-t                                                                                    | 78.1                    | 38.9                         | 23430                             |
 | [MobileSAM](mobile-sam.md)                                                                     | 40.7                    | 10.1                         | 23802                             |
 | [FastSAM-s](fast-sam.md) with YOLOv8 [backbone](https://www.ultralytics.com/glossary/backbone) | 23.9                    | 11.8                         | 58.0                              |
-| Ultralytics [YOLOv8n-seg](yolov8.md)                                                           | **7.1** (11.0x smaller) | **3.4** (11.4x less)         | **24.8** (945x faster)            |
-| Ultralytics [YOLO11n-seg](yolo11.md)                                                           | **6.2** (12.6x smaller) | **2.9** (13.4x less)         | **24.3** (964x faster)            |
-| Ultralytics [YOLO26n-seg](yolo26.md)                                                           | **6.7** (11.7x smaller) | **2.7** (14.4x less)         | **25.2** (930x faster)            |
+| Ultralytics [YOLOv8n-seg](yolov8.md)                                                           | 7.1 (11.0x smaller)     | 3.4 (11.4x less)             | 24.8 (945x faster)                |
+| Ultralytics [YOLO11n-seg](yolo11.md)                                                           | **6.2** (12.6x smaller) | 2.9 (13.4x less)             | **24.3** (964x faster)            |
+| Ultralytics [YOLO26n-seg](yolo26.md)                                                           | 6.7 (11.7x smaller)     | **2.7** (14.4x less)         | 25.2 (930x faster)                |
 
 This comparison demonstrates the substantial differences in model sizes and speeds between SAM variants and YOLO segmentation models. While SAM provides unique automatic segmentation capabilities, YOLO models, particularly YOLOv8n-seg, YOLO11n-seg and YOLO26n-seg, are significantly smaller, faster, and more computationally efficient.
 
@@ -359,7 +359,7 @@ SAM speeds measured with PyTorch, YOLO speeds measured with ONNX Runtime. Tests 
         for file_name in ["yolov8n-seg.pt", "yolo11n-seg.pt", "yolo26n-seg.pt"]:
             model = YOLO(file_name)
             model.info()
-            onnx_path = model.export(format="onnx", dynamic=True)
+            onnx_path = model.export(format="onnx", dynamic=True, nms=False)  # YOLO26 NMS-free head; no-op for YOLOv8/YOLO11
             model = YOLO(onnx_path)
             model(ASSETS)
         ```

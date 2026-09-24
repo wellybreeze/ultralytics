@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from ultralytics.nn.modules import Detect, Pose, Pose26
-from ultralytics.utils import LINUX, LOGGER, MACOS
+from ultralytics.utils import AUTOINSTALL, LINUX, LOGGER, MACOS
 from ultralytics.utils.checks import (
     IS_PYTHON_MINIMUM_3_13,
     check_apt_requirements,
@@ -45,7 +45,7 @@ def _tf_decode_boxes(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
     grid_h, grid_w = shape[2:4]
     grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=boxes.device).reshape(1, 4, 1)
     norm = self.strides / (self.stride[0] * grid_size)
-    dbox = self.decode_bboxes(self.dfl(boxes) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+    dbox = self.decode_bboxes(self.dfl(boxes) * norm, self.anchors.unsqueeze(0) * norm[:, :2], x.get("angle"))
     return dbox
 
 
@@ -119,8 +119,7 @@ def onnx2saved_model(
             "protobuf>=6.31.1,<7.0.0"
             if IS_PYTHON_MINIMUM_3_13
             else "protobuf>=5",  # TF>2.19 (Python 3.13) needs protobuf>=6.31.1; cap <7 to match TF gencode and avoid PaddlePaddle segfault
-        ),
-        cmds="--extra-index-url https://pypi.ngc.nvidia.com",  # onnx_graphsurgeon only on NVIDIA
+        )
     )
 
     LOGGER.info(f"\n{prefix} starting export with tensorflow {tf.__version__}...")
@@ -144,6 +143,7 @@ def onnx2saved_model(
         if images is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             np.save(str(tmp_file), images)  # BHWC
+            del images
             np_data = [["images", tmp_file, [[[[0, 0, 0]]]], [[[[255, 255, 255]]]]]]
 
     # Patch onnx.helper for onnx_graphsurgeon compatibility with ONNX>=1.17
@@ -260,6 +260,10 @@ def tflite2edgetpu(tflite_file: str | Path, output_dir: str | Path, prefix: str 
         ).returncode
         != 0
     ):
+        if not AUTOINSTALL:
+            raise FileNotFoundError(
+                f"Edge TPU compiler not found and YOLO_AUTOINSTALL=False. Install it from {help_url}"
+            )
         LOGGER.info(f"\n{prefix} export requires Edge TPU compiler. Attempting install from {help_url}")
         sudo = "sudo " if is_sudo_available() else ""
         for c in (

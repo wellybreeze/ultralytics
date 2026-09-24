@@ -6,16 +6,18 @@ import glob
 import math
 import os
 import random
-from copy import deepcopy
+import shutil
+from copy import copy, deepcopy
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 
-from ultralytics.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS, check_file_speeds
+from ultralytics.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS, check_file_speeds, get_split_fraction
 from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
 from ultralytics.utils.patches import imread
 
@@ -32,7 +34,7 @@ class BaseDataset(Dataset):
         augment (bool): Whether to apply data augmentation.
         single_cls (bool): Whether to treat all objects as a single class.
         prefix (str): Prefix to print in log messages.
-        fraction (float): Fraction of dataset to utilize.
+        fraction (float | int): Dataset ratio or image count to use.
         channels (int): Number of channels in the images (1 for grayscale, 3 for color). Color images loaded with OpenCV
             are in BGR channel order.
         cv2_flag (int): OpenCV flag for reading images.
@@ -69,6 +71,41 @@ class BaseDataset(Dataset):
         get_labels: Get labels method to be implemented by subclasses.
     """
 
+    class _ImageCache:
+        """Store images in one tensor, shared copy-on-write by fork workers and as shared memory by pickled ones."""
+
+        def __init__(self, images: list[np.ndarray]):
+            """Pack images into one contiguous uint8 tensor and their layouts into NumPy arrays."""
+            self.shapes = np.array([im.shape for im in images])
+            self.dtypes = np.array([im.dtype.str for im in images])
+            self.offsets = np.concatenate(([0], np.cumsum([im.nbytes for im in images])))
+            self.buffer = torch.empty(int(self.offsets[-1]), dtype=torch.uint8)
+            buffer = self.buffer.numpy()
+            for i, im in enumerate(images):
+                buffer[self.offsets[i] : self.offsets[i + 1]] = im.reshape(-1).view(np.uint8)
+                images[i] = None
+
+        def __getitem__(self, i: int) -> np.ndarray:
+            """Return an image view by index."""
+            i = range(len(self.shapes))[i]
+            return (
+                self.buffer.numpy()[self.offsets[i] : self.offsets[i + 1]].view(self.dtypes[i]).reshape(self.shapes[i])
+            )
+
+        def __getstate__(self) -> dict[str, Any]:
+            """Pickle the buffer by value, as each worker's own copy, when Linux shared memory is too small to share it."""
+            state = self.__dict__.copy()
+            shm = Path("/dev/shm")  # also carries worker batches, so require the same 2x margin as check_cache_ram()
+            if not self.buffer.is_shared() and shm.is_dir() and shutil.disk_usage(shm).free < 2 * self.offsets[-1]:
+                LOGGER.warning(f"{shm} too small to share {self.offsets[-1] / (1 << 30):.1f}GB image cache, copying it")
+                state["buffer"] = self.buffer.numpy()
+            return state
+
+        def __setstate__(self, state: dict[str, Any]):
+            """Restore the buffer as a tensor."""
+            state["buffer"] = torch.as_tensor(state["buffer"])
+            self.__dict__.update(state)
+
     def __init__(
         self,
         img_path: str | list[str],
@@ -101,7 +138,7 @@ class BaseDataset(Dataset):
             pad (float): Padding value.
             single_cls (bool): If True, single class training is used.
             classes (list[int], optional): List of included classes.
-            fraction (float): Fraction of dataset to utilize.
+            fraction (float | int): Dataset ratio or image count to use.
             channels (int): Number of channels in the images (1 for grayscale, 3 for color). Color images loaded with
                 OpenCV are in BGR channel order.
         """
@@ -111,7 +148,7 @@ class BaseDataset(Dataset):
         self.augment = augment
         self.single_cls = single_cls
         self.prefix = prefix
-        self.fraction = fraction
+        self.fraction = get_split_fraction(fraction, "train")
         self.channels = channels
         self.cv2_flag = cv2.IMREAD_GRAYSCALE if channels == 1 else cv2.IMREAD_COLOR
         self.im_files = self.get_img_files(self.img_path)
@@ -145,7 +182,7 @@ class BaseDataset(Dataset):
             self.cache_images()
 
         # Transforms
-        self.transforms = self.build_transforms(hyp=hyp)
+        self.transforms = self.build_transforms(hyp=copy(hyp))  # subclasses zero unsupported keys, never the caller's
 
     def get_img_files(self, img_path: str | list[str]) -> list[str]:
         """Read image files from the specified path.
@@ -179,8 +216,8 @@ class BaseDataset(Dataset):
             assert im_files, f"{self.prefix}No images found in {img_path}. {FORMATS_HELP_MSG}"
         except Exception as e:
             raise FileNotFoundError(f"{self.prefix}Error loading data from {img_path}\n{HELP_URL}") from e
-        if self.fraction < 1:
-            im_files = im_files[: round(len(im_files) * self.fraction)]  # retain a fraction of the dataset
+        count = self.fraction if isinstance(self.fraction, int) else max(1, round(len(im_files) * self.fraction))
+        im_files = im_files[:count] if count < len(im_files) else im_files
         check_file_speeds(im_files, prefix=self.prefix)  # check image read speeds
         return im_files
 
@@ -268,7 +305,7 @@ class BaseDataset(Dataset):
                 im = im[..., None]
 
             # Add to buffer if training with augmentations
-            if self.augment:
+            if self.augment and self.cache != "ram":
                 self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
                 self.buffer.append(i)
                 if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
@@ -289,12 +326,14 @@ class BaseDataset(Dataset):
             pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
             for i, x in pbar:
                 if self.cache == "disk":
-                    b += self.npy_files[i].stat().st_size
+                    b += self.npy_files[i].stat().st_size if self.npy_files[i].exists() else 0  # failed writes unlink
                 else:  # 'ram'
                     self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
                     b += self.ims[i].nbytes
                 pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
             pbar.close()
+        if self.cache == "ram":
+            self.ims = self._ImageCache(self.ims)
 
     def cache_images_to_disk(self, i: int) -> None:
         """Save an image as an *.npy file for faster loading."""
@@ -306,7 +345,7 @@ class BaseDataset(Dataset):
                 f.unlink(missing_ok=True)
                 LOGGER.warning(f"{self.prefix}WARNING ⚠️ Failed to cache image {f}: {e}")
 
-    def check_cache_disk(self, safety_margin: float = 0.5) -> bool:
+    def check_cache_disk(self, safety_margin: float = 0.1) -> bool:
         """Check if there's enough disk space for caching images.
 
         Args:
@@ -315,8 +354,6 @@ class BaseDataset(Dataset):
         Returns:
             (bool): True if there's enough disk space, False otherwise.
         """
-        import shutil
-
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
@@ -341,7 +378,7 @@ class BaseDataset(Dataset):
             return False
         return True
 
-    def check_cache_ram(self, safety_margin: float = 0.5) -> bool:
+    def check_cache_ram(self, safety_margin: float = 1.0) -> bool:
         """Check if there's enough RAM for caching images.
 
         Args:
@@ -353,11 +390,7 @@ class BaseDataset(Dataset):
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
-            im = imread(random.choice(self.im_files))  # sample image
-            if im is None:
-                continue
-            ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
-            b += im.nbytes * ratio**2
+            b += self.load_image(random.randrange(self.ni))[0].nbytes
         mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
         mem = __import__("psutil").virtual_memory()
         if mem_required > mem.available:

@@ -40,7 +40,7 @@ curl -X GET "https://<your-label-studio>/api/projects/<project-id>/export?export
 
 A Label Studio YOLO export carries its class list alongside the labels, and Platform reads it:
 
-```
+```text
 archive.zip/
 ├── classes.txt        # class names Platform reads first
 ├── notes.json         # fallback, used only when classes.txt is missing or empty
@@ -61,6 +61,9 @@ Label Studio offers [several export formats](https://labelstud.io/guide/export).
 | **YOLO** / **COCO**  | No    | Annotation files only — the dataset imports with no images                           |
 | **Pascal VOC XML**   | No    | XML label files cannot be read                                                       |
 
+In a COCO export, every annotation must carry a `bbox` to be read, crowd regions (`"iscrowd": 1`) are skipped, and the
+category names become your class names — so a COCO archive does not need `classes.txt` to keep its labels.
+
 !!! warning "Pascal VOC imports without annotations"
 
     Platform does not read Pascal VOC XML labels, and a VOC export fails quietly rather than loudly: the images import and the annotations do not. Choose YOLO with Images or COCO with Images instead.
@@ -77,3 +80,21 @@ Picking the right export format is the step the integration removes. Once it shi
 !!! tip "Available now"
 
     The [Labelbox](labelbox.md) and [Roboflow](roboflow.md) integrations work today, and Platform imports YOLO, COCO, and Ultralytics NDJSON datasets directly.
+
+## FAQ
+
+### Which Label Studio export format should I choose?
+
+Choose **YOLO with Images** so the archive contains `classes.txt` and the images. **COCO with Images** also imports. The plain YOLO and COCO options write label files only, and Pascal VOC XML is not read.
+
+### Why did my dataset import with no images?
+
+The plain `YOLO` or `COCO` export was used. Those archives omit the images because Label Studio normally serves them from URLs. Re-export with the **with Images** variant.
+
+### Why are my classes named `class0`, `class1`, and so on?
+
+Platform reads `classes.txt` (or `notes.json` as a fallback) from the root of the archive. Upload the export exactly as Label Studio produced it; re-zipping it inside another folder hides the class list.
+
+### Can I export from the API instead of the UI?
+
+Yes. Call the export endpoint with `exportType=YOLO_WITH_IMAGES`, or `COCO_WITH_IMAGES` and `YOLO_OBB_WITH_IMAGES`. Large projects should use the snapshot endpoints, which build the export as a background job.

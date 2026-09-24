@@ -28,6 +28,13 @@ class WeDetectPredictor(DetectionPredictor):
             self.model.set_classes(prompts)
             self.model.names = {i: n for i, n in enumerate(prompts)}
 
+    def postprocess(self, preds, img, orig_imgs, **kwargs):
+        """Keep per-class scores on the same box (PPE multi-label); class-wise NMS still applies."""
+        names = getattr(self.model, "names", None) or {}
+        if len(names) > 1:
+            self.args.multi_label = True
+        return super().postprocess(preds, img, orig_imgs, **kwargs)
+
     def pre_transform(self, im):
         """Pre-transform input images before inference."""
         return super().pre_transform(im)

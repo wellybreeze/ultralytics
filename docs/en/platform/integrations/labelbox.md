@@ -52,7 +52,7 @@ Platform recognizes the Labelbox format on its own and maps bounding boxes and p
 | Polygon                                                          | [Segment](../../datasets/segment/index.md) |
 | Segmentation mask, point, polyline, relationship, classification | Not yet                                    |
 
-Each object's `name` becomes the class name — so a `"name": "Dog"` annotation imports as the class `Dog`, not its lowercase `value` — and pixel coordinates are normalized against the `media_attributes` dimensions in the export. A catalog export with no annotations imports as an unlabeled image dataset, ready to label in Platform's [annotation editor](../data/annotation.md).
+Each object's `name` becomes the class name — so a `"name": "Dog"` annotation imports as the class `Dog`, not its lowercase `value` — and pixel coordinates are normalized against the `media_attributes` dimensions in the export. Each image is named after its `data_row.external_id`, falling back to the file name in the signed URL when the export carries no external ID. A catalog export with no annotations imports as an unlabeled image dataset, ready to label in Platform's [annotation editor](../data/annotation.md).
 
 A single data row looks like this, trimmed to the fields Platform reads:
 
@@ -96,3 +96,21 @@ Everything else in the export — `embeddings`, `metadata_fields`, `attachments`
 !!! warning "In a mixed export, the boxes are dropped"
 
     An export containing both bounding boxes and polygons is imported as a segment dataset, and a segment dataset carries polygon geometry only — the box annotations are not used for training or included in version exports. Export boxes and polygons as separate Labelbox projects if you need both. Polygons also need at least three points to be read.
+
+## FAQ
+
+### Which Labelbox annotations are imported?
+
+Bounding boxes import as a [detect](../../datasets/detect/index.md) dataset and polygons as a [segment](../../datasets/segment/index.md) dataset. Segmentation masks, points, polylines, relationships, and classifications are not yet read, so a project labeled only with those tools imports its images without annotations.
+
+### Why did my export import with no data rows?
+
+Platform reads NDJSON, one JSON object per line. An export saved as a single JSON array is skipped entirely. Use the SDK loop above or Labelbox's own **Export data** download, which is already NDJSON.
+
+### Why did the import fail with expired links?
+
+Labelbox exports reference images by signed URL, and those signatures expire. Re-export from Labelbox and upload the new file soon after it finishes.
+
+### Can I keep both boxes and polygons from one project?
+
+No. A mixed export imports as a segment dataset and only the polygons are used. Export boxes and polygons as separate Labelbox projects if you need both.

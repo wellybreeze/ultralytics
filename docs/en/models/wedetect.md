@@ -36,7 +36,7 @@ Two fine-tune modes:
 ## Pipeline
 
 ```text
-YOLO labels + class_texts JSON
+YOLO labels or ktw-anno JSON + class_texts JSON
         ↓
 optional teacher pseudo labels (SAM3 / YOLO / WeDetect / D-FINE)
         ↓
@@ -80,7 +80,8 @@ First-epoch CUDA OOM on a single GPU halves `batch` (max 3 retries) and rebuilds
 
 ### Val
 
-- **Single YAML:** encode the first `nc` rows of `class_texts` (or `names`) and score mAP as usual.
+- **Single YAML:** encode the first `nc` rows of `class_texts` (or `names`) and score mAP as usual. ktw-anno one-box multi-label: see the [OV fine-tune guide](../guides/wedetect-ov-finetune.md).
+- **NMS:** epoch val, `final_eval`, and standalone `model.val()` all force `multi_label=True` (`nc>1` keeps co-located classes).
 - **Mixed `val.yolo_data`:** every epoch (and `final_eval`) switches `nc` / `names` / `class_texts` and rebuilds the dataloader. LVIS prefers `minival` when present.
 
 `results.csv` columns:
@@ -94,15 +95,17 @@ First-epoch CUDA OOM on a single GPU halves `batch` (max 3 retries) and rebuilds
 
 Optional mixed-val knobs (dataset YAML or `default.yaml`):
 
-| Key                                    | Default        | Role                                                            |
-| -------------------------------------- | -------------- | --------------------------------------------------------------- |
-| `val_fitness_weights`                  | equal share    | Epoch-1 weights (same order as `val.yolo_data`)                 |
-| `val_fitness_dynamic`                  | `False`        | Epoch 2+ reweight from previous mAP50-95 gaps                   |
-| `val_fitness_lvis_target_mult`         | `2.0`          | When a val set is LVIS, its target = `mult ×` mean customer mAP |
-| `val_fitness_dynamic_ema`              | `0.5`          | EMA on dynamic weights                                          |
-| `val_fitness_weight_clip_min` / `_max` | `0.5` / `20.0` | Clip raw `target/mAP` before normalize                          |
+| Key                                    | Default        | Role                                                                       |
+| -------------------------------------- | -------------- | -------------------------------------------------------------------------- |
+| `val_fitness_weights`                  | equal share    | Per-set weights (same order as `val.yolo_data`); all epochs unless dynamic |
+| `val_fitness_dynamic`                  | `False`        | If `true`, epoch 2+ reweight from prior mAP50-95 gaps                      |
+| `val_fitness_lvis_target_mult`         | `2.0`          | When a val set is LVIS, its target = `mult ×` mean customer mAP            |
+| `val_fitness_dynamic_ema`              | `0.5`          | EMA on dynamic weights                                                     |
+| `val_fitness_weight_clip_min` / `_max` | `0.5` / `20.0` | Clip raw `target/mAP` before normalize                                     |
 
-Do not treat unprefixed `metrics/mAP50-95(B)` as mixed-training fitness.
+`val_fitness_weights` apply **every epoch** when dynamic is off (default). Raise a set's weight to give it more say in `best.pt`. Dynamic mode uses those weights on epoch 1 only; later epochs reweight toward low-mAP sets. If LVIS mAP is far below the customer set, LVIS can dominate and combined `fitness` may peak at epoch 1 — `best.pt` then freezes before PPE attributes are learned. Keep dynamic off for small-domain fine-tunes. Mixed-yaml keys override CLI / `default.yaml`; `args.yaml` may still show the CLI default — trust the train log `dynamic=on|off`.
+
+Do not treat unprefixed `metrics/mAP50-95(B)` as mixed-training fitness. Read `<dataset>/` columns (or `model.val` on the customer yaml) for PPE.
 
 ### Predict
 
@@ -114,7 +117,7 @@ model.set_classes(["人", "公交车", "车"])
 results = model.predict(source="ultralytics/assets/bus.jpg", conf=0.25, save=True)
 ```
 
-`set_classes` encodes prompts with XLM-R + `text_model_weights` and caches `txt_feats` on the head.
+`set_classes` encodes prompts with XLM-R + `text_model_weights` and caches `txt_feats` on the head. When `nc>1`, `WeDetectPredictor` sets `multi_label=True` so co-located classes can survive NMS (`default.yaml` `multi_label=False` does not apply to WeDetect predict).
 
 ### Export
 
@@ -159,8 +162,8 @@ val:
     yolo_data:
         - ultralytics/cfg/datasets/customer/lvis.yaml
         - ultralytics/cfg/datasets/customer/vehicle.yaml
-val_fitness_weights: [2, 1]
-val_fitness_dynamic: true
+val_fitness_weights: [2, 1] # all epochs when dynamic is false; larger = more best.pt vote
+val_fitness_dynamic: false # true: epoch 1 uses the list above, then reweights (can lock best.pt early)
 ```
 
 With `mix_global_texts=True` (default), synonym overlap merges a global vocab and remaps local `cls`. Optional `train.grounding_data` uses `GroundingDataset` (full COCO-style JSON with `caption` + `tokens_positive`, not JSONL).
@@ -195,7 +198,7 @@ Artifacts (dataset `path` root / first image directory):
 
 Cache hit requires matching meta hash, on-disk `*_train.json`, merged cache, **and** a complete teacher cache whose **version + hash** match. A version bump (for example `1.0.3` → `1.0.4`) misses at `apply_pseudo_labels_to_subset` and re-runs the teacher. `YOLODataset.get_labels()` is more tolerant: hash-matched merged caches can load across versions; if merged cache is gone, it rebuilds from teacher cache + GT **without** re-inference.
 
-Class-level synonym overlap drops colliding teacher classes. Remaining classes append after GT ids. Boxes are concatenated with **no IoU NMS**.
+Class-level synonym overlap drops colliding teacher classes. Remaining classes append after GT ids. Non-ktw boxes are concatenated with **no IoU NMS**. ktw-anno boxes with **IoU > 0.7** collapse to one box and the union of labels.
 
 ### D-FINE as teacher
 

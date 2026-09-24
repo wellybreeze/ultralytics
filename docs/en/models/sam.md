@@ -20,7 +20,7 @@ The Segment Anything Model, or SAM, is a cutting-edge image segmentation model t
 
 SAM's advanced design allows it to adapt to new image distributions and tasks without prior knowledge, a feature known as zero-shot transfer. Trained on the expansive [SA-1B dataset](https://ai.meta.com/datasets/segment-anything/), which contains more than 1 billion masks spread over 11 million carefully curated images, SAM has displayed impressive zero-shot performance, surpassing previous fully supervised results in many cases.
 
-![SA-1B dataset sample with automatic segmentation masks](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/sa-1b-dataset-sample.avif) **SA-1B Example images.** Dataset images overlaid masks from the newly introduced SA-1B dataset. SA-1B contains 11M diverse, high-resolution, licensed, and privacy protecting images and 1.1B high-quality segmentation masks. These masks were annotated fully automatically by SAM, and as verified by human ratings and numerous experiments, are of high quality and diversity. Images are grouped by number of masks per image for visualization (there are ∼100 masks per image on average).
+![SA-1B dataset sample with automatic segmentation masks](https://cdn.ul.run/i/620ba43b239b65fda908547da826ac16.avif) **SA-1B Example images.** Dataset images overlaid masks from the newly introduced SA-1B dataset. SA-1B contains 11M diverse, high-resolution, licensed, and privacy protecting images and 1.1B high-quality segmentation masks. These masks were annotated fully automatically by SAM, and as verified by human ratings and numerous experiments, are of high quality and diversity. Images are grouped by number of masks per image for visualization (there are ∼100 masks per image on average).
 
 ## Key Features of the Segment Anything Model (SAM)
 
@@ -154,7 +154,7 @@ The Segment Anything Model can be employed for a multitude of downstream tasks t
         predictor = SAMPredictor(overrides=overrides)
 
         # Segment with additional args
-        results = predictor(source="ultralytics/assets/zidane.jpg", crop_n_layers=1, points_stride=64)
+        results = predictor(source="ultralytics/assets/zidane.jpg", crop_n_layers=1, points_stride=64, min_mask_region_area=100)
         ```
 
 !!! note
@@ -172,9 +172,9 @@ Here we compare Meta's SAM-b model with Ultralytics segmentation models includin
 | [Meta SAM-b](sam.md)                                                                           | 375                     | 93.7                         | 41703                             |
 | [MobileSAM](mobile-sam.md)                                                                     | 40.7                    | 10.1                         | 23802                             |
 | [FastSAM-s](fast-sam.md) with YOLOv8 [backbone](https://www.ultralytics.com/glossary/backbone) | 23.9                    | 11.8                         | 58.0                              |
-| Ultralytics [YOLOv8n-seg](yolov8.md)                                                           | **7.1** (52.8x smaller) | **3.4** (27.6x less)         | **24.8** (1682x faster)           |
-| Ultralytics [YOLO11n-seg](yolo11.md)                                                           | **6.2** (60.5x smaller) | **2.9** (32.3x less)         | **24.3** (1716x faster)           |
-| Ultralytics [YOLO26n-seg](yolo26.md)                                                           | **6.7** (56.0x smaller) | **2.7** (34.7x less)         | **25.2** (1655x faster)           |
+| Ultralytics [YOLOv8n-seg](yolov8.md)                                                           | 7.1 (52.8x smaller)     | 3.4 (27.6x less)             | 24.8 (1682x faster)               |
+| Ultralytics [YOLO11n-seg](yolo11.md)                                                           | **6.2** (60.5x smaller) | 2.9 (32.3x less)             | **24.3** (1716x faster)           |
+| Ultralytics [YOLO26n-seg](yolo26.md)                                                           | 6.7 (56.0x smaller)     | **2.7** (34.7x less)         | 25.2 (1655x faster)               |
 
 This comparison demonstrates the substantial differences in model sizes and speeds between SAM variants and YOLO segmentation models. While SAM provides unique automatic segmentation capabilities, YOLO models, particularly YOLOv8n-seg, YOLO11n-seg and YOLO26n-seg, are significantly smaller, faster, and more computationally efficient.
 
@@ -202,7 +202,7 @@ SAM speeds measured with PyTorch, YOLO speeds measured with ONNX Runtime. Tests 
         for file_name in ["yolov8n-seg.pt", "yolo11n-seg.pt", "yolo26n-seg.pt"]:
             model = YOLO(file_name)
             model.info()
-            onnx_path = model.export(format="onnx", dynamic=True)
+            onnx_path = model.export(format="onnx", dynamic=True, nms=False)  # YOLO26 NMS-free head; no-op for YOLOv8/YOLO11
             model = YOLO(onnx_path)
             model(ASSETS)
         ```
@@ -233,7 +233,7 @@ Auto-annotation with pretrained models can dramatically cut down the time and ef
 
 ## Citations and Acknowledgments
 
-If you find SAM useful in your research or development work, please consider citing our paper:
+If you find SAM useful in your research or development work, please consider citing the paper:
 
 !!! quote ""
 
@@ -254,9 +254,9 @@ We would like to express our gratitude to Meta AI for creating and maintaining t
 
 ## FAQ
 
-### What is the Segment Anything Model (SAM) by Ultralytics?
+### What is the Segment Anything Model (SAM)?
 
-The Segment Anything Model (SAM) by Ultralytics is a revolutionary image segmentation model designed for promptable segmentation tasks. It leverages advanced architecture, including image and prompt encoders combined with a lightweight mask decoder, to generate high-quality segmentation masks from various prompts such as spatial or text cues. Trained on the expansive [SA-1B dataset](https://ai.meta.com/datasets/segment-anything/), SAM excels in zero-shot performance, adapting to new image distributions and tasks without prior knowledge.
+Meta's Segment Anything Model (SAM) is a revolutionary image segmentation model designed for promptable segmentation tasks. It leverages advanced architecture, including image and prompt encoders combined with a lightweight mask decoder, to generate high-quality segmentation masks from various prompts such as spatial or text cues. Trained on the expansive [SA-1B dataset](https://ai.meta.com/datasets/segment-anything/), SAM excels in zero-shot performance, adapting to new image distributions and tasks without prior knowledge.
 
 ### How can I use the Segment Anything Model (SAM) for image segmentation?
 

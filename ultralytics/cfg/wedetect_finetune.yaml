@@ -179,7 +179,7 @@ shear: 0.0 # (float) shear degrees (+/-); original max_shear_degree=0.0
 perspective: 0.0 # (float) perspective fraction (0–0.001 typical)
 flipud: 0.2 # (float) vertical flip probability; original only RandomFlip horizontal
 fliplr: 0.5 # (float) horizontal flip probability; original RandomFlip prob=0.5
-bgr: 0.3 # (float) RGB↔BGR channel swap probability; not used in original
+bgr: 0.0 # (float) RGB↔BGR channel swap probability; not used in original
 mosaic: 1.0 # (float) mosaic probability; original MultiModalMosaic always on until close_mosaic
 mixup: 0.15 # (float) MixUp probability; original mixup_prob=0.15
 cutmix: 0.0 # (float) CutMix augmentation probability

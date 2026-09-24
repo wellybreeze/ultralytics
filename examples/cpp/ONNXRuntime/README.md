@@ -2,7 +2,7 @@
 
 <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=cplusplus&logoColor=white"> <img alt="ONNX Runtime" src="https://img.shields.io/badge/ONNX%20Runtime-717272.svg?logo=onnx&logoColor=white"> <img alt="OpenCV" src="https://img.shields.io/badge/OpenCV-5C3EE8.svg?logo=opencv&logoColor=white">
 
-A single C++ application that runs **every [Ultralytics YOLO](https://docs.ultralytics.com/) task and model generation** with [ONNX Runtime](https://onnxruntime.ai/) and [OpenCV](https://opencv.org/). Point it at any exported `.onnx` model — the program reads the task, class names, and input size from the model metadata and picks the right post-processing automatically.
+A single C++ application that runs **every [Ultralytics YOLO](https://docs.ultralytics.com) task and model generation** with [ONNX Runtime](https://onnxruntime.ai/) and [OpenCV](https://opencv.org/). Point it at any exported `.onnx` model — the program reads the task, class names, and input size from the model metadata and picks the right post-processing automatically.
 
 ## ✨ Features
 
@@ -27,7 +27,7 @@ A single C++ application that runs **every [Ultralytics YOLO](https://docs.ultra
 Export any model and task to ONNX with the Ultralytics `export` mode. `opset=12` is recommended for broad compatibility.
 
 ```bash
-yolo export model=yolo26n.pt format=onnx opset=12      # detect   (end2end)
+yolo export model=yolo26n.pt format=onnx opset=12      # detect   (add nms=False for NMS-free output)
 yolo export model=yolo26n-seg.pt format=onnx opset=12  # segment
 yolo export model=yolo26n-pose.pt format=onnx opset=12 # pose
 yolo export model=yolo26n-obb.pt format=onnx opset=12  # obb

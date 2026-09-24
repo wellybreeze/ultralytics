@@ -16,7 +16,7 @@ The export to TFLite Edge TPU format feature allows you to optimize your [Ultral
 Exporting models to [TensorFlow](https://www.ultralytics.com/glossary/tensorflow) Edge TPU makes [machine learning](https://www.ultralytics.com/glossary/machine-learning-ml) tasks fast and efficient. This technology suits applications with limited power, computing resources, and connectivity. The Edge TPU is a hardware accelerator by Google. It speeds up TensorFlow Lite models on edge devices. The image below shows an example of the process involved.
 
 <p align="center">
-  <img width="100%" src="https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/tflite-edge-tpu-compile-workflow.avif" alt="TensorFlow Lite Edge TPU compilation workflow">
+  <img width="100%" src="https://cdn.ul.run/i/1ae94bc857840372b88ae8bf00492b39.avif" alt="TensorFlow Lite Edge TPU compilation workflow">
 </p>
 
 The Edge TPU works with quantized models. Quantization makes models smaller and faster without losing much [accuracy](https://www.ultralytics.com/glossary/accuracy). It is ideal for the limited resources of edge computing, allowing applications to respond quickly by reducing latency and allowing for quick data processing locally, without cloud dependency. Local processing also keeps user data private and secure since it's not sent to a remote server.
@@ -38,8 +38,6 @@ Before we jump into how to export YOLO26 models to the TFLite Edge TPU format, l
 TFLite Edge TPU offers various deployment options for machine learning models, including:
 
 - **On-Device Deployment**: TensorFlow Edge TPU models can be directly deployed on mobile and embedded devices. On-device deployment allows the models to execute directly on the hardware, eliminating the need for cloud connectivity, either by embedding the model in the application bundle or downloading it on demand.
-
-- **Edge Computing with Cloud TensorFlow TPUs**: In scenarios where edge devices have limited processing capabilities, TensorFlow Edge TPUs can offload inference tasks to cloud servers equipped with TPUs.
 
 - **Hybrid Deployment**: A hybrid approach combines on-device and cloud deployment and offers a versatile and scalable solution for deploying machine learning models. Advantages include on-device processing for quick responses and [cloud computing](https://www.ultralytics.com/glossary/cloud-computing) for more complex computations.
 
@@ -142,19 +140,19 @@ The TFLite Edge TPU format supports the [Export](../modes/export.md), [Predict](
 
 ### Export Arguments
 
-| Argument   | Type             | Default     | Description                                                                                                                                                                                                                                                             |
-| ---------- | ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `format`   | `str`            | `'edgetpu'` | Target format for the exported model, defining compatibility with various deployment environments.                                                                                                                                                                      |
-| `imgsz`    | `int` or `tuple` | `640`       | Desired image size for the model input. Can be an integer for square images or a tuple `(height, width)` for specific dimensions.                                                                                                                                       |
-| `quantize` | `int` or `str`   | `8`/auto    | Quantization precision. `8` (INT8) is required and auto-enabled for Edge TPU, compressing the model and speeding up inference with minimal [accuracy](https://www.ultralytics.com/glossary/accuracy) loss on edge devices. Replaces the deprecated `half`/`int8` flags. |
-| `opset`    | `int`            | `None`      | Specifies the ONNX opset version for the intermediate ONNX graph. If not set, uses the latest supported version.                                                                                                                                                        |
-| `data`     | `str`            | `None`      | Path to the [dataset](../datasets/index.md) YAML, essential for quantization; classification instead takes a dataset directory or a built-in dataset name. If omitted with `quantize=8`, Ultralytics selects the default calibration dataset for the model task.        |
-| `fraction` | `float`          | `1.0`       | Specifies the fraction of the dataset to use for INT8 quantization calibration. Allows for calibrating on a subset of the full dataset, useful for experiments or when resources are limited. If not specified with INT8 enabled, the full dataset will be used.        |
-| `device`   | `str`            | `None`      | Specifies the device for exporting: CPU (`device=cpu`).                                                                                                                                                                                                                 |
+| Argument   | Type                      | Default     | Description                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format`   | `str`                     | `'edgetpu'` | Target format for the exported model, defining compatibility with various deployment environments.                                                                                                                                                                      |
+| `imgsz`    | `int` or `tuple`          | `640`       | Desired image size for the model input. Can be an integer for square images or a tuple `(height, width)` for specific dimensions.                                                                                                                                       |
+| `quantize` | `int` or `str`            | `8`/auto    | Quantization precision. `8` (INT8) is required and auto-enabled for Edge TPU, compressing the model and speeding up inference with minimal [accuracy](https://www.ultralytics.com/glossary/accuracy) loss on edge devices. Replaces the deprecated `half`/`int8` flags. |
+| `opset`    | `int`                     | `None`      | Specifies the ONNX opset version for the intermediate ONNX graph. If not set, uses the latest supported version.                                                                                                                                                        |
+| `data`     | `str`                     | `None`      | Path to the [dataset](../datasets/index.md) YAML, essential for quantization; classification instead takes a dataset directory or a built-in dataset name. If omitted with `quantize=8`, Ultralytics selects the default calibration dataset for the model task.        |
+| `fraction` | `float`, `int`, or `list` | `1.0`       | Calibration subset as a ratio, image count, or `[train, val, test]` ratios/counts. Two-item lists leave `test` full, while `0` skips it.                                                                                                                                |
+| `device`   | `str`                     | `None`      | Specifies the device for exporting: CPU (`device=cpu`).                                                                                                                                                                                                                 |
 
 !!! tip
 
-    Please make sure to use an x86 Linux machine when exporting to EdgeTPU.
+    Please make sure to use an x86 Linux machine when exporting to Edge TPU.
 
 For more details about the export process, visit the [Ultralytics documentation page on exporting](../modes/export.md).
 
@@ -174,7 +172,7 @@ However, for in-depth instructions on deploying your TFLite Edge TPU models, tak
 
 In this guide, we've learned how to export Ultralytics YOLO26 models to TFLite Edge TPU format. By following the steps mentioned above, you can increase the speed and power of your [computer vision](https://www.ultralytics.com/glossary/computer-vision-cv) applications.
 
-For further details on usage, visit the [Edge TPU official website](https://cloud.google.com/tpu).
+For further details on usage, visit the [Coral Edge TPU official website](https://developers.google.com/coral).
 
 Also, for more information on other Ultralytics YOLO26 integrations, please visit our [integration guide page](index.md). There, you'll discover valuable resources and insights.
 

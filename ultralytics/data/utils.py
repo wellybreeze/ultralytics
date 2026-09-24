@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import subprocess
@@ -50,12 +51,244 @@ IMG_FORMATS = {
 }
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # videos
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
+DATASET_KEY_TYPES = {  # dataset YAML keys and their permitted types
+    "path": (str,),
+    "train": (str, list),
+    "val": (str, list),
+    "test": (str, list),
+    "names": (list, dict),
+    "kpt_shape": (list,),
+    "flip_idx": (list,),
+}
+
+DEPTH_PNG_SCALE = 1000  # uint16 millimeters by default; zero is invalid
 
 
-def img2label_paths(img_paths: list[str], label_dir: str = "labels", suffix: str = ".txt") -> list[str]:
+def save_depth_png(path: str | Path, depth: np.ndarray, scale: float = DEPTH_PNG_SCALE) -> None:
+    """Save metric depth as a scaled uint16 PNG with zero reserved for invalid pixels."""
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool) or not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Depth scale must be a positive finite number")
+    depth = np.asarray(depth, dtype=np.float32).squeeze()
+    if depth.ndim != 2:
+        raise ValueError(f"Depth map must be 2D, got shape {depth.shape}")
+    valid = np.isfinite(depth) & (depth > 0)
+    encoded = np.zeros(depth.shape, dtype=np.uint16)
+    if valid.any():
+        scaled = np.rint(depth[valid] * scale)
+        if scaled.max() > np.iinfo(np.uint16).max:
+            raise ValueError(f"Depth map exceeds the {np.iinfo(np.uint16).max / scale:g} meter PNG limit")
+        encoded[valid] = np.maximum(scaled, 1).astype(np.uint16)
+    if not cv2.imwrite(str(path), encoded):
+        raise OSError(f"Failed to save depth map to {path}")
+
+
+def load_depth(path: str | Path, scale: float = DEPTH_PNG_SCALE) -> np.ndarray:
+    """Load metric depth from a scaled uint16 PNG or floating-point meter NPY."""
+    path = Path(path)
+    if path.suffix.lower() == ".npy":
+        depth = np.load(path, allow_pickle=False)
+        if depth.ndim != 2 or depth.dtype.kind != "f":
+            raise ValueError(f"Depth map {path} must be a 2D floating-point NPY array")
+        return np.nan_to_num(depth.astype(np.float32, copy=False), copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool) or not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Depth scale must be a positive finite number")
+    with Image.open(path) as image:
+        if image.format != "PNG" or image.mode not in {"I", "I;16"}:
+            raise ValueError(f"Depth PNG {path} must be a 2D uint16 map")
+        encoded = np.asarray(image)
+    depth = encoded.astype(np.float32)
+    depth /= scale
+    return depth
+
+
+def img2label_paths(img_paths: list[str | Path], label_dir: str = "labels", suffix: str = ".txt") -> list[str]:
     """Convert image paths to label paths by replacing 'images' with 'labels' and extension with '.txt'."""
     sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}{label_dir}{os.sep}"  # /images/, /labels/ substrings
-    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + f"{suffix}" for x in img_paths]
+    return [sb.join(os.fspath(x).rsplit(sa, 1)).rsplit(".", 1)[0] + f"{suffix}" for x in img_paths]
+
+
+def resolve_label_paths(img_paths: list[str], label_dir: str = "labels") -> list[str]:
+    """Return companion label paths, using ktw-anno ``.json`` only when no YOLO ``.txt`` exists.
+
+    Existing detect / segment / pose txt datasets are unchanged. A JSON sidecar is used when it is the only label file
+    for that image (typical ktw-anno layout).
+    """
+    txts = img2label_paths(img_paths, label_dir=label_dir, suffix=".txt")
+    jsons = img2label_paths(img_paths, label_dir=label_dir, suffix=".json")
+    return [j if os.path.isfile(j) and not os.path.isfile(t) else t for t, j in zip(txts, jsons)]
+
+
+def is_ktw_anno(obj: Any) -> bool:
+    """Return True if ``obj`` is a ktw-anno (or compatible LabelMe-like) dict."""
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("format") == "ktw-anno":
+        return True
+    return isinstance(obj.get("shapes"), list) and ("imageWidth" in obj or "imageHeight" in obj)
+
+
+def _ktw_tags(item: dict) -> list[str]:
+    """Read a box's candidate texts from ``labels`` (list) or LabelMe ``label`` (str)."""
+    raw = item.get("labels")
+    if raw is None and item.get("label") is not None:
+        raw = [item["label"]]
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(t).strip() for t in raw if str(t).strip()]
+
+
+def _ktw_difficult(item: dict) -> bool:
+    """Return True if the box is marked difficult (schema v1 field or v2 flags)."""
+    if item.get("difficult"):
+        return True
+    flags = item.get("flags")
+    return bool(isinstance(flags, dict) and flags.get("difficult"))
+
+
+def _ktw_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float, w: float, h: float) -> list[float] | None:
+    """Convert pixel xyxy to normalized xywh; return None if the box has no area."""
+    xa, xb = (x1, x2) if x1 <= x2 else (x2, x1)
+    ya, yb = (y1, y2) if y1 <= y2 else (y2, y1)
+    bw, bh = xb - xa, yb - ya
+    if w <= 0 or h <= 0 or bw <= 0 or bh <= 0:
+        return None
+    return [(xa + xb) / 2 / w, (ya + yb) / 2 / h, bw / w, bh / h]
+
+
+def parse_ktw_anno(obj: dict, img_hw: tuple[int, int]) -> tuple[list[list[float]], list[list[str]]]:
+    """Parse ktw-anno JSON into normalized xywh boxes and per-box candidate labels.
+
+    Supports schema v2 ``shapes`` (rectangle/polygon ``points``) and schema v1 ``boxes`` (xmin/xmax).
+
+    Args:
+        obj (dict): Loaded ktw-anno JSON object.
+        img_hw (tuple[int, int]): Image (height, width) from the actual image file.
+
+    Returns:
+        (tuple): ``(xywh_list, instance_labels)`` where each xywh is normalized ``[x, y, w, h]``.
+    """
+    h, w = float(img_hw[0]), float(img_hw[1])
+    xywhs: list[list[float]] = []
+    instance_labels: list[list[str]] = []
+
+    shapes = obj.get("shapes")
+    if isinstance(shapes, list):
+        for item in shapes:
+            if not isinstance(item, dict) or _ktw_difficult(item):
+                continue
+            tags = _ktw_tags(item)
+            if not tags:
+                continue
+            points = item.get("points") or []
+            if len(points) < 2:
+                continue
+            xs, ys = [], []
+            for p in points:
+                if isinstance(p, (list, tuple)) and len(p) >= 2:
+                    xs.append(float(p[0]))
+                    ys.append(float(p[1]))
+            if len(xs) < 2:
+                continue
+            xywh = _ktw_xyxy_to_xywh(min(xs), min(ys), max(xs), max(ys), w, h)
+            if xywh is None:
+                continue
+            xywhs.append(xywh)
+            instance_labels.append(tags)
+        return xywhs, instance_labels
+
+    boxes = obj.get("boxes")
+    if isinstance(boxes, list):
+        for item in boxes:
+            if not isinstance(item, dict) or _ktw_difficult(item):
+                continue
+            tags = _ktw_tags(item)
+            if not tags:
+                continue
+            try:
+                xywh = _ktw_xyxy_to_xywh(
+                    float(item["xmin"]),
+                    float(item["ymin"]),
+                    float(item["xmax"]),
+                    float(item["ymax"]),
+                    w,
+                    h,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if xywh is None:
+                continue
+            xywhs.append(xywh)
+            instance_labels.append(tags)
+    return xywhs, instance_labels
+
+
+def ktw_unique_names(labels: list[dict], first_only: bool = False) -> list[str]:
+    """Collect unique ktw-anno strings from cached ``instance_labels``.
+
+    Args:
+        labels (list[dict]): Dataset label dicts that may contain ``instance_labels``.
+        first_only (bool): If True, only the first tag of each box is kept.
+
+    Returns:
+        (list[str]): Unique strings, first-seen casing, sorted case-insensitively.
+    """
+    seen: dict[str, str] = {}
+    for lb in labels:
+        for tags in lb.get("instance_labels") or []:
+            seq = tags[:1] if first_only else tags
+            for t in seq:
+                s = str(t).strip()
+                if s:
+                    seen.setdefault(s.lower(), s)
+    return sorted(seen.values(), key=str.lower)
+
+
+def ktw_plot_instances(labels: list[dict]) -> tuple[np.ndarray, np.ndarray, dict[int, str]] | None:
+    """Expand ktw-anno boxes to one plot instance per tag (train ``labels.jpg`` class histogram).
+
+    Returns None when no ``instance_labels`` are present so callers keep YOLO-txt cache cls.
+    """
+    if not any(lb.get("instance_labels") for lb in labels):
+        return None
+    names_list = ktw_unique_names(labels, first_only=False)
+    name_to_id = {s.lower(): i for i, s in enumerate(names_list)}
+    boxes: list = []
+    cls: list[int] = []
+    for lb in labels:
+        bboxes = lb.get("bboxes")
+        inst = lb.get("instance_labels") or []
+        if bboxes is None or not len(bboxes) or not inst:
+            continue
+        n = min(len(bboxes), len(inst))
+        for i in range(n):
+            seen: set[str] = set()
+            for t in inst[i]:
+                s = str(t).strip()
+                k = s.lower()
+                if not s or k in seen:
+                    continue
+                seen.add(k)
+                cid = name_to_id.get(k)
+                if cid is None:
+                    continue
+                boxes.append(np.asarray(bboxes[i], dtype=np.float32))
+                cls.append(cid)
+    names = dict(enumerate(names_list))
+    if not boxes:
+        return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.float32), names
+    return np.stack(boxes, 0), np.asarray(cls, dtype=np.float32), names
+
+
+def _ktw_cache_cls(tags: list[str], name_to_id: dict[str, int] | None) -> float:
+    """Map the first in-vocab tag to a class id for cache (sampling and labels.jpg happen later)."""
+    if name_to_id:
+        for t in tags:
+            cid = name_to_id.get(t, name_to_id.get(t.lower()))
+            if cid is not None and cid >= 0:
+                return float(cid)
+    return 0.0
 
 
 def check_file_speeds(
@@ -132,21 +365,24 @@ def check_file_speeds(
         LOGGER.warning(
             f"{prefix}Slow image access detected ({ping_msg}{speed_msg}{size_msg}). "
             f"Use local storage instead of remote/mounted storage for better performance. "
-            f"See https://docs.ultralytics.com/guides/model-training-tips/"
+            f"See https://docs.ultralytics.com/guides/model-training-tips"
         )
 
 
 def get_hash(paths: list[str]) -> str:
-    """Return a single hash value of a list of paths (files or dirs)."""
-    size = 0
+    """Return a hash of paths and their file sizes and modification times."""
+    h = __import__("hashlib").sha256()
     for p in paths:
+        h.update(p.encode())
+        h.update(b"\0")
         try:
-            size += os.stat(p).st_size
+            stat = os.stat(p)
         except OSError:
+            h.update(b"\0")
             continue
-    h = __import__("hashlib").sha256(str(size).encode())  # hash sizes
-    h.update("".join(paths).encode())  # hash paths
-    return h.hexdigest()  # return hash
+        h.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 def dataset_root(data: dict | None = None, im_files: list[str] | None = None) -> Path | None:
@@ -267,8 +503,8 @@ def verify_image(args: tuple) -> tuple:
 
 
 def verify_image_depth(args: tuple) -> tuple:
-    """Verify that an image and its paired depth .npy map exist and are readable."""
-    im_file, depth_file, prefix = args
+    """Verify that an image and its paired depth map exist and are readable."""
+    im_file, depth_file, prefix, scale = args
     # Number (found, missing, corrupt), message
     nf, nm, nc, msg = 0, 0, 0, ""
     try:
@@ -278,8 +514,23 @@ def verify_image_depth(args: tuple) -> tuple:
             nm = 1
             msg = f"{prefix}{im_file}: ignoring image with missing depth map {depth_file}"
             return None, None, nf, nm, nc, msg
-        depth = np.load(depth_file, mmap_mode="r", allow_pickle=False)
-        assert depth.ndim == 2, f"depth map {depth_file} expected a 2D array, got shape {depth.shape}"
+        if Path(depth_file).suffix.lower() == ".npy":
+            depth = np.load(depth_file, mmap_mode="r", allow_pickle=False)
+            assert depth.ndim == 2 and depth.dtype.kind == "f", "depth NPY must be 2D and floating-point"
+            depth_shape = depth.shape
+        else:
+            assert (
+                isinstance(scale, (int, float)) and not isinstance(scale, bool) and np.isfinite(scale) and scale > 0
+            ), "depth_scale must be a positive finite number"
+            with Image.open(depth_file) as depth:
+                assert depth.format == "PNG" and depth.mode in {"I", "I;16"}, (
+                    f"depth map {depth_file} must be an integer grayscale PNG"
+                )
+                depth_shape = (depth.height, depth.width)
+                depth.verify()
+        assert abs(np.log((depth_shape[1] / depth_shape[0]) / (shape[1] / shape[0]))) <= 0.02, (
+            f"depth map shape {depth_shape} does not match image shape {shape}"
+        )
         nf = 1
         return im_file, shape, nf, nm, nc, msg
     except Exception as e:
@@ -290,7 +541,7 @@ def verify_image_depth(args: tuple) -> tuple:
 
 def verify_image_mask(args: tuple) -> tuple:
     """Verify that an image and its semantic mask exist, are readable, and have matching shapes."""
-    im_file, mask_file, prefix, check_bit_depth = args
+    im_file, mask_file, prefix = args
     # Number (found, missing, corrupt), message
     nf, nm, nc, msg = 0, 0, 0, ""
     try:
@@ -306,10 +557,8 @@ def verify_image_mask(args: tuple) -> tuple:
             mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
             assert mask is not None, f"mask file {mask_file} is unreadable"
             assert mask.shape[:2] == shape, f"mask size {mask.shape[:2]} does not match image size {shape}"
-            is_1bit = False
-            if check_bit_depth:
-                with Image.open(mask_file) as im:
-                    is_1bit = im.mode == "1"
+            with Image.open(mask_file) as im:
+                is_1bit = im.mode == "1"  # recorded for every mask so a yaml 'nc' edit never needs a rescan
             nf = 1
         else:
             nm = 1
@@ -323,10 +572,16 @@ def verify_image_mask(args: tuple) -> tuple:
 
 
 def verify_image_label(args: tuple) -> list:
-    """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    """Verify one image-label pair.
+
+    The 11th return value is ``instance_labels`` (per-box text lists) for ktw-anno JSON, or ``None`` for YOLO txt so
+    existing 10-tuple unpack sites can use ``*rest``.
+    """
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args[:8]
+    name_to_id = args[8] if len(args) > 8 else None
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    instance_labels = None
     try:
         # Verify images
         msg, shape = check_image(im_file)
@@ -335,40 +590,61 @@ def verify_image_label(args: tuple) -> list:
         # Verify labels
         if os.path.isfile(lb_file):
             nf = 1  # label found
-            with open(lb_file, encoding="utf-8") as f:
-                lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
-                    assert not any(len(x) == 5 for x in lb), "labels mix segment and detection rows"
-                    classes = np.array([x[0] for x in lb], dtype=np.float32)
-                    segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
-                    lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
-                lb = np.array(lb, dtype=np.float32)
-            if nl := len(lb):
-                if keypoint:
-                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
-                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
-                else:
-                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+            if str(lb_file).endswith(".json"):
+                with open(lb_file, encoding="utf-8") as f:
+                    obj = json.load(f)
+                if not is_ktw_anno(obj):
+                    raise ValueError(f"JSON label is not ktw-anno: {lb_file}")
+                xywhs, instance_labels = parse_ktw_anno(obj, shape)
+                if xywhs:
+                    cls_col = np.array(
+                        [_ktw_cache_cls(tags, name_to_id) for tags in instance_labels], dtype=np.float32
+                    ).reshape(-1, 1)
+                    if single_cls:
+                        cls_col[:] = 0
+                    lb = np.concatenate([cls_col, np.array(xywhs, dtype=np.float32)], axis=1)
                     points = lb[:, 1:]
-                # Coordinate points check with 1% tolerance
-                assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
-                assert lb.min() >= -0.01, f"negative class labels or coordinate {lb[lb < -0.01]}"
-
-                # All labels
-                max_cls = 0 if single_cls else lb[:, 0].max()  # max label count
-                assert max_cls < num_cls, (
-                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
-                    f"Possible class labels are 0-{num_cls - 1}"
-                )
-                _, i = np.unique(lb, axis=0, return_index=True)
-                if len(i) < nl:  # duplicate row check
-                    lb = lb[i]  # remove duplicates
-                    if segments:
-                        segments = [segments[x] for x in i]
-                    msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
+                    assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
+                    assert lb[:, 1:].min() >= -0.01, f"negative coordinate {lb[lb[:, 1:] < -0.01]}"
+                else:
+                    ne = 1
+                    instance_labels = []
+                    lb = np.zeros((0, 5), dtype=np.float32)
             else:
-                ne = 1  # label empty
-                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+                with open(lb_file, encoding="utf-8") as f:
+                    lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                    if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
+                        assert not any(len(x) == 5 for x in lb), "labels mix segment and detection rows"
+                        classes = np.array([x[0] for x in lb], dtype=np.float32)
+                        segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                        lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                    lb = np.array(lb, dtype=np.float32)
+                if nl := len(lb):
+                    if keypoint:
+                        assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
+                        points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                    else:
+                        assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                        points = lb[:, 1:]
+                    # Coordinate points check with 1% tolerance
+                    assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
+                    assert lb.min() >= -0.01, f"negative class labels or coordinate {lb[lb < -0.01]}"
+
+                    # All labels
+                    max_cls = 0 if single_cls else lb[:, 0].max()  # max label count
+                    assert max_cls < num_cls, (
+                        f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                        f"Possible class labels are 0-{num_cls - 1}"
+                    )
+                    _, i = np.unique(lb, axis=0, return_index=True)
+                    if len(i) < nl:  # duplicate row check
+                        lb = lb[i]  # remove duplicates
+                        if segments:
+                            segments = [segments[x] for x in i]
+                        msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
+                else:
+                    ne = 1  # label empty
+                    lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         else:
             nm = 1  # label missing
             lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
@@ -378,11 +654,11 @@ def verify_image_label(args: tuple) -> list:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg, instance_labels
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+        return [None, None, None, None, None, nm, nf, ne, nc, msg, None]
 
 
 def visualize_image_annotations(image_path: str, txt_path: str, label_map: dict[int, str]):
@@ -518,7 +794,20 @@ def find_dataset_yaml(path: Path) -> Path:
     return files[0]
 
 
-def convert_ndjson_to_yolo_if_needed(data: str | Path) -> str | Path:
+def get_split_fraction(fraction: float | list[float | int], split: str) -> float | int:
+    """Return a split ratio/count, normalizing boundary values to 0.0 (none) or 1.0 (all)."""
+    if isinstance(fraction, list) and split in (splits := ("train", "val", "test")):
+        index = splits.index(split)
+        fraction = fraction[index] if index < len(fraction) else 1.0
+    elif split != "train":
+        fraction = 1.0
+    fraction = float(fraction) if fraction in {0, 1} else fraction
+    if split in {"train", "val"} and fraction == 0:
+        raise ValueError(f"{split} fraction must select at least one image")
+    return fraction
+
+
+def convert_ndjson_to_yolo_if_needed(data: str | Path, fraction=1.0, *, split=None) -> str | Path:
     """Convert an NDJSON dataset or Platform dataset URI to YOLO format."""
     data = normalize_platform_uri(data)  # accept Platform web URLs (https://platform.ultralytics.com/.../datasets/...)
     data_str = str(data)
@@ -527,7 +816,7 @@ def convert_ndjson_to_yolo_if_needed(data: str | Path) -> str | Path:
 
         from ultralytics.data.converter import convert_ndjson_to_yolo
 
-        return asyncio.run(convert_ndjson_to_yolo(data))
+        return asyncio.run(convert_ndjson_to_yolo(data, fraction=fraction, split=split))
     return data
 
 
@@ -558,13 +847,18 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
     extract_dir = ""
     if zipfile.is_zipfile(file) or is_tarfile(file):
         new_dir = safe_download(file, dir=DATASETS_DIR, unzip=True, delete=False)
-        file = find_dataset_yaml(DATASETS_DIR / new_dir)
+        file = new_dir if new_dir.is_file() else find_dataset_yaml(new_dir)
         extract_dir, autodownload = file.parent, False
 
     # Read YAML
     data = YAML.load(file, append_filename=True)  # dictionary
 
     # Checks
+    for key, valid_types in DATASET_KEY_TYPES.items():
+        if data.get(key) is not None and not isinstance(data[key], valid_types):
+            expected = " or ".join(t.__name__ for t in valid_types)
+            raise TypeError(f"{dataset} '{key}' must be {expected}, not {type(data[key]).__name__}")
+
     for k in "train", "val":
         if k not in data:
             if k != "val" or "validation" not in data:
@@ -577,8 +871,15 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
         raise FileNotFoundError(f"{dataset} '{split}:' images not found ❌")
     # `names` compared to None, not membership: a bare `names:` parses to None and len(None) below
     # raises. `nc` stays membership so a valueless `nc:` still reaches its "must be an integer" error.
+    # ktw-anno JSON may omit both: WeDetect trains per-image texts; val names are inferred from that split.
     if data.get("names") is None and "nc" not in data:
-        raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
+        data["_ktw_auto_names"] = True
+        data["names"] = {0: "object"}
+        data["nc"] = 1
+        LOGGER.info(
+            f"{dataset} has no 'names' or 'nc'; inferring from ktw-anno JSON if present "
+            "(WeDetect: per-image texts + NegQueue; val names = unique labels in that split)."
+        )
     if "nc" in data and not isinstance(data["nc"], int):
         try:
             nc = float(data["nc"])  # accept integer-like values, e.g. '10' or 10.0, but not 1.9 or placeholders
@@ -673,6 +974,8 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
             dt = f"({round(time.time() - t, 1)}s)"
             s = f"success ✅ {dt}, saved to {colorstr('bold', DATASETS_DIR)}" if r in {0, None} else f"failure {dt} ❌"
             LOGGER.info(f"Dataset download {s}\n")
+    if data.get("masks_dir") is None and (path / "masks").is_dir():  # after download so scripts can create it
+        data["masks_dir"] = "masks"  # PNG semantic masks in the default folder select SemanticDataset
     check_font("Arial.ttf" if is_ascii(data["names"]) else "Arial.Unicode.ttf")  # download fonts
 
     return data  # dictionary
@@ -713,7 +1016,7 @@ def check_cls_dataset(dataset: str | Path, split: str = "") -> dict[str, Any]:
         if data_dir.suffix != "":
             raise ValueError(
                 f'Classification datasets must be a directory (data="path/to/dir") not a file (data="{dataset}"), '
-                "See https://docs.ultralytics.com/datasets/classify/"
+                "See https://docs.ultralytics.com/datasets/classify"
             )
         LOGGER.info("")
         LOGGER.warning(f"Dataset not found, missing path {data_dir}, attempting download...")

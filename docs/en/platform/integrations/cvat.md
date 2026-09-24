@@ -37,7 +37,7 @@ Replace `104` with your project ID and the format string with the variant matchi
 
 CVAT's Ultralytics YOLO export produces the layout Platform expects, so nothing needs converting:
 
-```
+```text
 archive.zip/
 ├── data.yaml          # class names Platform reads
 ├── images/train/
@@ -48,11 +48,16 @@ archive.zip/
 
 CVAT offers [many export formats](https://docs.cvat.ai/docs/dataset_management/formats/). Three matter here:
 
-| CVAT Format          | Works  | Notes                                                                                        |
-| -------------------- | ------ | -------------------------------------------------------------------------------------------- |
-| **Ultralytics YOLO** | Best   | Ships `data.yaml`, so your label names come across intact                                    |
-| **COCO 1.0**         | Yes    | Read too; a mix of polygons and boxes imports as segment, and the box-only ones are dropped  |
-| **YOLO 1.1**         | Partly | Boxes import, but its `obj.names` file is not read — classes arrive as `class0`, `class1`, … |
+| CVAT Format            | Works  | Notes                                                                                        |
+| ---------------------- | ------ | -------------------------------------------------------------------------------------------- |
+| **Ultralytics YOLO**   | Best   | Ships `data.yaml`, so your label names come across intact                                    |
+| **COCO 1.0**           | Yes    | Read too; a mix of polygons and boxes imports as segment, and the box-only ones are dropped  |
+| **COCO Keypoints 1.0** | Yes    | Imports as a pose dataset, with the keypoint count taken from the most common shape          |
+| **YOLO 1.1**           | Partly | Boxes import, but its `obj.names` file is not read — classes arrive as `class0`, `class1`, … |
+
+Every COCO annotation must carry a `bbox` to be read, and crowd regions (`"iscrowd": 1`) are skipped. Category names
+become the class names, and category IDs are unified across all the JSON files in the archive, so per-split exports keep
+consistent class IDs.
 
 !!! warning "Pascal VOC imports without annotations"
 
@@ -70,3 +75,21 @@ Picking the right export format is the step the integration removes. Once it shi
 !!! tip "Available now"
 
     The [Labelbox](labelbox.md) and [Roboflow](roboflow.md) integrations work today, and Platform imports YOLO, COCO, and Ultralytics NDJSON datasets directly.
+
+## FAQ
+
+### Which CVAT export format should I choose?
+
+Choose the **Ultralytics YOLO** entry that matches your task, with **Save images** turned on. It ships `data.yaml`, so class names arrive intact. COCO 1.0 and COCO Keypoints 1.0 also import, while YOLO 1.1 loses class names and Pascal VOC imports without annotations.
+
+### Why did my dataset import without any images?
+
+The **Save images** switch was off, or the CLI export ran without `--with-images yes`. The archive then holds annotations only. Re-export with images included.
+
+### Does the import support segmentation and pose?
+
+Yes. Use `Ultralytics YOLO Segmentation 1.0` or `Ultralytics YOLO Pose 1.0`, or the COCO variants. A COCO export mixing polygons and boxes imports as a segment dataset and drops the box-only annotations.
+
+### What will change when the direct integration ships?
+
+You will upload any CVAT image detection or segmentation export as-is and Platform will map it to the matching YOLO task itself. Datasets you import today with the Ultralytics YOLO export continue to work unchanged.

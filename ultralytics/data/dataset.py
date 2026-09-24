@@ -39,11 +39,15 @@ from .utils import (
     check_file_speeds,
     dataset_root,
     get_hash,
+    get_split_fraction,
     img2label_paths,
+    ktw_unique_names,
     load_dataset_cache_file,
+    load_depth,
     polygons2masks_overlap,
     portable_paths_hash,
     remap_label_im_files,
+    resolve_label_paths,
     save_dataset_cache_file,
     verify_image,
     verify_image_depth,
@@ -100,7 +104,15 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        self.ktw_open = False  # set in get_labels when YAML omitted names/nc for ktw-anno + WeDetect
+        self._ktw_bags: dict[tuple, tuple] = {}  # per-box shuffle bags for train sampling
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+        nkpt, ndim = self.data.get("kpt_shape", (0, 0))
+        if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):  # checked before the label cache is consulted
+            raise ValueError(
+                "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
+                "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
+            )
         # BaseDataset does not store hyp on self; read mask_refine from the constructor arg.
         hyp = kwargs.get("hyp")
         if isinstance(hyp, dict):
@@ -166,11 +178,14 @@ class YOLODataset(BaseDataset):
             (list[str]): List of label file paths.
         """
         label_dir = (self.data or {}).get("labels_dir") or "labels"
-        self.label_files = img2label_paths(self.im_files, label_dir=str(label_dir))
+        self.label_files = resolve_label_paths(self.im_files, label_dir=str(label_dir))
+        n_json = sum(1 for p in self.label_files if str(p).endswith(".json"))
+        if n_json and LOCAL_RANK in {-1, 0}:
+            LOGGER.info(f"{self.prefix}{n_json} ktw-anno JSON label files (per-box label sampling at train time)")
         return self.label_files
 
     def get_cache_hash(self) -> str:
-        """Return the hash used to validate a label cache against the current dataset files.
+        """Return the hash used to validate a label cache against the current dataset files and scan settings.
 
         Uses dataset-root-relative path keys so ``*.cache`` remains valid when the
         dataset is moved across machines (same layout under ``data.path``).
@@ -178,8 +193,11 @@ class YOLODataset(BaseDataset):
         Returns:
             (str): Dataset cache hash.
         """
-        root = dataset_root(self.data or {}, self.im_files)
-        return portable_paths_hash(list(self.label_files) + list(self.im_files), root=root)
+        data = self.data or {}
+        root = dataset_root(data, self.im_files)
+        names = data.get("names") or {}
+        scan_args = (self.use_keypoints, len(names), data.get("kpt_shape"), self.single_cls)
+        return portable_paths_hash(list(self.label_files) + list(self.im_files) + [str(scan_args)], root=root)
 
     def scan_summary(self, nf: int, nm: int, ne: int, nc: int) -> str:
         """Return a one-line summary of scan counters for progress bars and cache logs.
@@ -202,11 +220,6 @@ class YOLODataset(BaseDataset):
             (tuple): (verify function, zipped argument iterable) for ThreadPool.imap.
         """
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
-        if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
-            raise ValueError(
-                "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
-                "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
-            )
         return verify_image_label, zip(
             self.im_files,
             self.label_files,
@@ -216,6 +229,7 @@ class YOLODataset(BaseDataset):
             repeat(nkpt),
             repeat(ndim),
             repeat(self.single_cls),
+            repeat(self._cache_name_to_id()),
         )
 
     def result_to_label(self, result: list) -> tuple[dict | None, int, int, int, int, str]:
@@ -227,7 +241,8 @@ class YOLODataset(BaseDataset):
         Returns:
             (tuple): (label dict or None, missing, found, empty, corrupt, message).
         """
-        im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg = result
+        im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg, *rest = result
+        instance_labels = rest[0] if rest else None
         label = (
             {
                 "im_file": im_file,
@@ -242,6 +257,8 @@ class YOLODataset(BaseDataset):
             if im_file
             else None
         )
+        if label is not None and instance_labels:
+            label["instance_labels"] = instance_labels
         return label, nm_f, nf_f, ne_f, nc_f, msg
 
     def verify_labels(self, labels: list[dict], cache_path: Path) -> None:
@@ -283,12 +300,18 @@ class YOLODataset(BaseDataset):
         label_dir = (self.data or {}).get("labels_dir") or "labels"
         is_pseudo_merged = str(label_dir) == "labels_pseudo_merged"
         if is_pseudo_merged:
-            from ultralytics.models.yolo.wedetect.pseudo_label import resolve_merged_cache_path
+            from ultralytics.models.yolo.wedetect.pseudo_label import (
+                KTW_PSEUDO_MERGE_IOU,
+                resolve_merged_cache_path,
+            )
 
             cache_path = resolve_merged_cache_path(self.data or {}, self.im_files)
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["hash"] == cache_hash  # identical hash
+            ktw_labels = any(str(p).lower().endswith(".json") for p in (self.label_files or []))
+            if is_pseudo_merged and ktw_labels and float(cache.get("ktw_iou") or 0) != KTW_PSEUDO_MERGE_IOU:
+                raise AssertionError(f"ktw-anno merged cache missing IoU>{KTW_PSEUDO_MERGE_IOU} multi-label merge")
             if cache["version"] != DATASET_CACHE_VERSION:
                 if is_pseudo_merged:
                     LOGGER.warning(
@@ -338,6 +361,7 @@ class YOLODataset(BaseDataset):
         [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
         self.im_files = [lb["im_file"] for lb in labels]  # update im_files
         self.verify_labels(labels, cache_path)
+        self._apply_ktw_auto_names(labels)
         return labels
 
     def build_transforms(self, hyp: dict | None = None) -> Compose:
@@ -354,6 +378,8 @@ class YOLODataset(BaseDataset):
             hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
             hyp.cutmix = hyp.cutmix if self.augment and not self.rect else 0.0
             transforms = v8_transforms(self, self.imgsz, hyp)
+            if self.format_class is SemanticFormat:  # masks rasterize from self.labels; only these read polygons
+                self.use_segments = bool(hyp.copy_paste or hyp.cutmix or getattr(hyp, "augmentations", None))
         else:
             transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
         transforms.append(
@@ -401,7 +427,7 @@ class YOLODataset(BaseDataset):
         return [k for k, v in category_freq.items() if v >= threshold]
 
     def close_mosaic(self, hyp: dict) -> None:
-        """Disable mosaic, copy_paste, mixup and cutmix augmentations by setting their probabilities to 0.0.
+        """Disable mosaic, copy_paste, mixup and cutmix augmentations by setting their values to 0.0.
 
         Args:
             hyp (dict): Hyperparameters for transforms.
@@ -411,6 +437,311 @@ class YOLODataset(BaseDataset):
         hyp.mixup = 0.0
         hyp.cutmix = 0.0
         self.transforms = self.build_transforms(hyp)
+
+    def _instance_label_groups(self) -> list[list[str]]:
+        """Synonym groups used to map ktw-anno strings to class ids (``data.names`` by default)."""
+        names = (self.data or {}).get("names") or {}
+        if not names:
+            return []
+        n = max(int(k) for k in names) + 1
+        groups: list[list[str]] = [[] for _ in range(n)]
+        for k, v in names.items():
+            i = int(k)
+            s = str(v).strip()
+            if 0 <= i < n and s:
+                groups[i] = [s]
+        return groups
+
+    def _allow_unknown_instance_labels(self) -> bool:
+        """Closed-set detect/segment drop unknown ktw strings; WeDetect OV may append them."""
+        return False
+
+    def _ktw_train_multihot(self) -> bool:
+        """Closed-vocab WeDetect train uses one box + multi-hot; YOLO detect keeps one-tag sampling."""
+        return False
+
+    def _apply_ktw_auto_names(self, labels: list[dict]) -> None:
+        """Infer names from ktw-anno JSON when the data YAML omitted ``names`` / ``nc``.
+
+        WeDetect (``YOLOMultiModalDataset``) trains with per-image texts and does not build a global phrase vocab.
+        Val fills ``data["names"]`` from every unique JSON tag in this split (one mAP class per string).
+        Closed-set YOLO infers the same unique strings.
+        """
+        data = self.data or {}
+        names = data.get("names") or {}
+        name_vals = [str(v).strip().lower() for v in names.values()]
+        placeholder = (not self.single_cls) and len(name_vals) == 1 and name_vals[0] == "object"
+        auto = bool(data.get("_ktw_auto_names")) or placeholder
+        has_ktw = any(lb.get("instance_labels") for lb in labels)
+        self.ktw_open = False
+        if not auto:
+            return
+        if not has_ktw:
+            LOGGER.warning(
+                f"{self.prefix}data YAML has no names/nc and no ktw-anno JSON was found; "
+                "using placeholder class 'object'"
+            )
+            return
+        open_vocab = self._allow_unknown_instance_labels()
+        if open_vocab:
+            self.ktw_open = True
+            if self.augment:
+                if hasattr(self, "use_neg_queue"):
+                    self.use_neg_queue = True
+                if LOCAL_RANK in {-1, 0}:
+                    LOGGER.info(
+                        f"{self.prefix}ktw-anno: YAML omitted names; train uses per-image texts + NegQueue "
+                        "(not a global phrase vocab)"
+                    )
+                return
+            uniques = ktw_unique_names(labels, first_only=False)
+        else:
+            uniques = ktw_unique_names(labels, first_only=False)
+            if self.augment and LOCAL_RANK in {-1, 0}:
+                LOGGER.warning(
+                    f"{self.prefix}ktw-anno YAML omitted names; inferred {len(uniques)} closed-set classes from this "
+                    "split (train/val ids may disagree). Prefer WeDetect, or set names in the YAML."
+                )
+        if not uniques:
+            return
+        data["names"] = dict(enumerate(uniques))
+        data["nc"] = len(uniques)
+        if LOCAL_RANK in {-1, 0}:
+            LOGGER.info(f"{self.prefix}ktw-anno inferred {data['nc']} names from JSON labels")
+
+    def _cache_name_to_id(self) -> dict[str, int]:
+        """String → class id for ktw-anno cache-time cls (first in-vocab tag)."""
+        mapping: dict[str, int] = {}
+        for i, group in enumerate(self._instance_label_groups()):
+            for s in group:
+                k = str(s).strip()
+                if k and k not in mapping:
+                    mapping[k] = i
+                kl = k.lower()
+                if kl and kl not in mapping:
+                    mapping[kl] = i
+        return mapping
+
+    def _next_ktw_tag(self, im_file: str, box_i: int, cands: list[str]) -> str:
+        """Draw one tag from a per-box shuffle bag (without replacement until the bag is empty).
+
+        Each box keeps a shuffled copy of its ``labels``. Consecutive train views cycle through that
+        permutation so every tag is used equally often; the bag is reshuffled when exhausted.
+        """
+        if len(cands) == 1:
+            return cands[0]
+        key = (im_file, box_i)
+        sig = tuple(cands)
+        order, pos, prev = self._ktw_bags.get(key, (None, 0, None))
+        if order is None or pos >= len(order) or prev != sig:
+            order = list(cands)
+            random.shuffle(order)
+            pos = 0
+        chosen = order[pos]
+        self._ktw_bags[key] = (order, pos + 1, sig)
+        return chosen
+
+    def _apply_instance_label_sampling(self, label: dict) -> None:
+        """Sample one text per ktw-anno box at train time; expand all tags at val.
+
+        Train (``augment=True``) draws one tag from a per-box shuffle bag so every label is used equally
+        often while order stays random. Val duplicates the box once per in-vocab tag so mAP scores each
+        label independently (one-box-multi-label). Unknown strings are dropped unless
+        ``_allow_unknown_instance_labels`` (train only).
+        """
+        raw = label.pop("instance_labels", None)
+        if not raw:
+            return
+        bboxes = label.get("bboxes")
+        if bboxes is None:
+            return
+        n = min(len(raw), len(bboxes))
+        segments = label.get("segments") or []
+        keypoints = label.get("keypoints")
+        if getattr(self, "ktw_open", False) and self.augment:
+            self._apply_ktw_open_sampling(label, raw, bboxes, segments, keypoints, n)
+            return
+        if self._ktw_train_multihot():
+            self._apply_ktw_multihot_sampling(label, raw, bboxes, segments, keypoints, n)
+            return
+        groups = self._instance_label_groups()
+        text_to_id = self._cache_name_to_id()
+        n_groups = len(groups)
+        allow = self._allow_unknown_instance_labels() and self.augment
+        extras: list[list[str]] = []
+        extra_index: dict[str, int] = {}
+        keep_i: list[int] = []
+        keep_cls: list[int] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            tags = [self._next_ktw_tag(str(label.get("im_file", "")), i, cands)] if self.augment else cands
+            seen_cid: set[int] = set()
+            for chosen in tags:
+                cid = text_to_id.get(chosen, text_to_id.get(chosen.lower()))
+                if cid is None:
+                    if not allow:
+                        continue
+                    if chosen not in extra_index:
+                        extra_index[chosen] = len(extras)
+                        extras.append([chosen])
+                    cid = n_groups + extra_index[chosen]
+                if cid in seen_cid:
+                    continue
+                seen_cid.add(cid)
+                keep_i.append(i)
+                keep_cls.append(cid)
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            if extras:
+                label["_extra_texts"] = extras
+            return
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        if extras:
+            label["_extra_texts"] = extras
+
+    def _apply_ktw_multihot_sampling(self, label: dict, raw: list, bboxes, segments, keypoints, n: int) -> None:
+        """Keep one physical box and a [N, C] multi-hot so co-labels are not TAL/one-hot negatives."""
+        groups = self._instance_label_groups()
+        text_to_id = self._cache_name_to_id()
+        n_groups = len(groups)
+        allow = self._allow_unknown_instance_labels()
+        extra_index: dict[str, int] = {}
+        extras: list[list[str]] = []
+        parsed: list[tuple[int, list[int], list[str]]] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            in_ids: list[int] = []
+            extra_names: list[str] = []
+            for t in cands:
+                cid = text_to_id.get(t, text_to_id.get(t.lower()))
+                if cid is None:
+                    if not allow:
+                        continue
+                    extra_names.append(t)
+                    if t not in extra_index:
+                        extra_index[t] = len(extras)
+                        extras.append([t])
+                    continue
+                in_ids.append(int(cid))
+            if not in_ids and not extra_names:
+                continue
+            parsed.append((i, in_ids, extra_names))
+        n_cols = n_groups + len(extras)
+        keep_i: list[int] = []
+        keep_cls: list[int] = []
+        keep_mh: list[np.ndarray] = []
+        person = text_to_id.get("人", text_to_id.get("人".lower()))
+        for i, in_ids, extra_names in parsed:
+            mh = np.zeros(n_cols, dtype=np.float32)
+            for cid in in_ids:
+                mh[cid] = 1
+            for t in extra_names:
+                mh[n_groups + extra_index[t]] = 1
+            if person is not None and int(person) < n_cols and mh[int(person)] > 0:
+                primary = int(person)
+            elif in_ids:
+                primary = in_ids[0]
+            else:
+                primary = n_groups + extra_index[extra_names[0]]
+            keep_i.append(i)
+            keep_cls.append(primary)
+            keep_mh.append(mh)
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            label["cls_multihot"] = np.zeros((0, n_cols), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            return
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        label["cls_multihot"] = np.stack(keep_mh, 0)
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        if extras:
+            label["_extra_texts"] = extras
+
+    def _apply_ktw_open_sampling(
+        self,
+        label: dict,
+        raw: list,
+        bboxes,
+        segments,
+        keypoints,
+        n: int,
+    ) -> None:
+        """Sample one string per box and build a per-image text list (no global vocab)."""
+        keep_i: list[int] = []
+        chosen: list[str] = []
+        for i in range(n):
+            cands = [str(t).strip() for t in raw[i] if str(t).strip()]
+            if not cands:
+                continue
+            keep_i.append(i)
+            chosen.append(self._next_ktw_tag(str(label.get("im_file", "")), i, cands))
+        if not keep_i:
+            label["cls"] = np.zeros((0, 1), dtype=np.float32)
+            label["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+            if segments:
+                label["segments"] = []
+            if keypoints is not None:
+                label["keypoints"] = np.zeros((0, *np.asarray(keypoints).shape[1:]), dtype=np.float32)
+            label["_ktw_sampled"] = True
+            label["_ktw_image_texts"] = []
+            return
+        text2id: dict[str, int] = {}
+        texts: list[list[str]] = []
+        keep_cls: list[int] = []
+        for s in chosen:
+            if s not in text2id:
+                text2id[s] = len(texts)
+                texts.append([s])
+            keep_cls.append(text2id[s])
+        idx = np.asarray(keep_i)
+        label["cls"] = np.asarray(keep_cls, dtype=np.float32).reshape(-1, 1)
+        label["bboxes"] = np.asarray(bboxes, dtype=np.float32)[idx]
+        if isinstance(segments, list) and segments:
+            label["segments"] = [segments[i] for i in keep_i if i < len(segments)]
+        elif isinstance(segments, np.ndarray) and len(segments):
+            label["segments"] = segments[idx]
+        if keypoints is not None and len(keypoints):
+            label["keypoints"] = np.asarray(keypoints)[idx]
+        if self.single_cls:
+            label["cls"][:] = 0
+        label["_ktw_sampled"] = True
+        label["_ktw_image_texts"] = texts
 
     def update_labels_info(self, label: dict) -> dict:
         """Update label format for different tasks.
@@ -425,6 +756,7 @@ class YOLODataset(BaseDataset):
             cls is not with bboxes now, classification and semantic segmentation need an independent cls label
             Can also support classification and semantic segmentation by adding or removing dict keys there.
         """
+        self._apply_instance_label_sampling(label)
         bboxes = label.pop("bboxes")
         segments = label.pop("segments", [])
         keypoints = label.pop("keypoints", None)
@@ -438,7 +770,7 @@ class YOLODataset(BaseDataset):
 
         # NOTE: do NOT resample oriented boxes
         segment_resamples = 100 if self.use_obb else 1000
-        if len(segments) > 0:
+        if len(segments) > 0 and (self.use_segments or self.format_class is not SemanticFormat):
             # make sure segments interpolate correctly if original length is greater than segment_resamples
             max_len = max(len(s) for s in segments)
             segment_resamples = (max_len + 1) if segment_resamples < max_len else segment_resamples
@@ -460,6 +792,33 @@ class YOLODataset(BaseDataset):
             (dict): Collated batch with stacked tensors.
         """
         new_batch = {}
+        if any("cls_multihot" in b for b in batch):
+            widths = [int(b["cls_multihot"].shape[-1]) for b in batch if "cls_multihot" in b]
+            c_dim = max(widths) if widths else 0
+            for b in batch:
+                mh = b.get("cls_multihot")
+                cls = b["cls"]
+                n = int(cls.shape[0])
+                if mh is None:
+                    if isinstance(cls, torch.Tensor):
+                        mh = cls.new_zeros((n, c_dim))
+                        if n and c_dim:
+                            ids = cls.view(-1).long().clamp(0, c_dim - 1)
+                            mh[torch.arange(n, device=cls.device), ids] = 1
+                    else:
+                        mh = np.zeros((n, c_dim), dtype=np.float32)
+                        if n and c_dim:
+                            ids = np.asarray(cls).reshape(-1).astype(int)
+                            valid = (ids >= 0) & (ids < c_dim)
+                            mh[np.flatnonzero(valid), ids[valid]] = 1
+                    b["cls_multihot"] = mh
+                elif int(mh.shape[-1]) < c_dim:
+                    if isinstance(mh, torch.Tensor):
+                        pad = mh.new_zeros(mh.shape[0], c_dim - mh.shape[-1])
+                        b["cls_multihot"] = torch.cat([mh, pad], 1)
+                    else:
+                        pad = np.zeros((mh.shape[0], c_dim - mh.shape[-1]), dtype=np.float32)
+                        b["cls_multihot"] = np.concatenate([mh, pad], 1)
         batch = [dict(sorted(b.items())) for b in batch]  # make sure the keys are in the same order
         keys = batch[0].keys()
         values = list(zip(*[list(b.values()) for b in batch]))
@@ -469,7 +828,7 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "cls_multihot", "segments", "obb"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         if "batch_idx" in new_batch:
@@ -514,8 +873,8 @@ class _NegQueue:
 class DepthDataset(YOLODataset):
     """Dataset for monocular depth estimation with paired RGB + depth map loading.
 
-    Extends YOLODataset to load depth ground truth maps alongside RGB images. Depth maps are stored as .npy files in a
-    parallel directory structure (images/train/*.jpg → depth/train/*.npy).
+    Extends YOLODataset to load depth ground truth maps alongside RGB images. Depth maps are stored as PNG or NPY files
+    in a parallel directory structure (images/train/*.jpg → depth/train/*.{png,npy}).
 
     Examples:
         >>> dataset = DepthDataset(img_path="/data/nyu/images/train", data={"nc": 1})
@@ -524,21 +883,23 @@ class DepthDataset(YOLODataset):
     format_class = DepthFormat
 
     def _depth_path_for(self, im_file: str) -> str:
-        """Map an image path to its companion depth .npy path (last 'images' path component → 'depth')."""
+        """Map an image path to its companion PNG or NPY depth target."""
         parts = list(Path(im_file).parts)
         for i in range(len(parts) - 1, -1, -1):
             if parts[i] == "images":
                 parts[i] = "depth"
                 break
-        return str(Path(*parts).with_suffix(".npy"))
+        path = Path(*parts).with_suffix(".png")
+        return str(path if path.is_file() else path.with_suffix(".npy"))
 
     def get_label_files(self) -> list[str]:
-        """Return the depth .npy paths paired with the dataset's images.
+        """Return the depth paths paired with the dataset's images.
 
         Returns:
             (list[str]): List of depth file paths.
         """
-        self.depth_files = [self._depth_path_for(f) for f in self.im_files]
+        self.depth_files_by_image = {f: self._depth_path_for(f) for f in self.im_files}
+        self.depth_files = list(self.depth_files_by_image.values())
         return self.depth_files
 
     def get_cache_hash(self) -> str:
@@ -547,7 +908,7 @@ class DepthDataset(YOLODataset):
         Returns:
             (str): Dataset cache hash.
         """
-        return get_hash(self.depth_files + self.im_files)
+        return get_hash(self.depth_files + self.im_files + [str(self.data.get("depth_scale", 1000))])
 
     def scan_summary(self, nf: int, nm: int, ne: int, nc: int) -> str:
         """Return a one-line summary of image-depth scan counters."""
@@ -555,7 +916,9 @@ class DepthDataset(YOLODataset):
 
     def verify_args(self) -> tuple:
         """Return the depth verification function and its argument iterable."""
-        return verify_image_depth, zip(self.im_files, self.depth_files, repeat(self.prefix))
+        return verify_image_depth, zip(
+            self.im_files, self.depth_files, repeat(self.prefix), repeat(self.data.get("depth_scale", 1000))
+        )
 
     def result_to_label(self, result: tuple) -> tuple[dict | None, int, int, int, int, str]:
         """Convert one verify_image_depth result into a label dict and scan counter increments."""
@@ -579,9 +942,8 @@ class DepthDataset(YOLODataset):
         """Skip box and segment checks; depth datasets carry no box or segment annotations."""
 
     def _load_depth(self, index):
-        """Return the native-resolution depth map for an image, with non-finite values mapped to 0 (invalid)."""
-        depth = np.load(self._depth_path_for(self.im_files[index])).astype(np.float32)
-        return np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        """Return the native-resolution depth map for an image."""
+        return load_depth(self.depth_files_by_image[self.im_files[index]], self.data.get("depth_scale", 1000))
 
     def get_image_and_label(self, index):
         """Load image, label, and depth map for the given index."""
@@ -649,6 +1011,18 @@ class YOLOMultiModalDataset(YOLODataset):
         self.use_neg_queue = bool((data or {}).get("use_neg_queue", False))
         super().__init__(*args, data=data, task=task, **kwargs)
 
+    def _instance_label_groups(self) -> list[list[str]]:
+        """Map ktw-anno strings through class_texts (including global mix) rather than names only."""
+        return [list(t) for t in self._active_texts]
+
+    def _allow_unknown_instance_labels(self) -> bool:
+        """Append instance-specific phrases not in the vocab as extra per-image texts (WeDetect OV)."""
+        return True
+
+    def _ktw_train_multihot(self) -> bool:
+        """Fixed class_texts/names: supervise every tag on the box; nameless OV keeps per-box sampling."""
+        return bool(self.augment) and not bool(getattr(self, "ktw_open", False))
+
     def _load_class_texts(self, data: dict) -> list[list[str]] | None:
         """Load class texts from external JSON file or return None to use data.names fallback.
 
@@ -669,10 +1043,14 @@ class YOLOMultiModalDataset(YOLODataset):
             raw = json.load(f)
         if not isinstance(raw, list) or len(raw) == 0:
             return None
-        nc = int(data.get("nc", 0) or 0)
         parsed = [[s.strip() for s in (x if isinstance(x, list) else [x]) if str(s).strip()] for x in raw]
         parsed = [row for row in parsed if row]
         LOGGER.info(f"Loaded class_texts from '{p}' ({len(parsed)} classes)")
+        if parsed and data.get("_ktw_auto_names"):
+            data["names"] = {i: row[0] for i, row in enumerate(parsed)}
+            data["nc"] = len(parsed)
+            data["_ktw_auto_names"] = False
+        nc = int(data.get("nc", 0) or 0)
         if nc > 0 and len(parsed) < nc:
             LOGGER.warning(f"class_texts count ({len(parsed)}) < nc ({nc}); missing classes will fall back at runtime")
         elif nc > 0 and len(parsed) > nc:
@@ -713,7 +1091,7 @@ class YOLOMultiModalDataset(YOLODataset):
         """Update ``RandomLoadText`` after global texts are attached (WeDetect OV path)."""
         if not getattr(self, "transforms", None) or not self.augment:
             return
-        n = min(len(self._active_texts), max_samples)
+        n = max_samples if getattr(self, "ktw_open", False) else min(len(self._active_texts), max_samples)
         for t in self.transforms.transforms:
             if isinstance(t, RandomLoadText):
                 t.max_samples = n
@@ -739,8 +1117,16 @@ class YOLOMultiModalDataset(YOLODataset):
             (dict): Updated label dictionary with instances and texts.
         """
         labels = super().update_labels_info(label)
-        texts = [list(t) for t in self._active_texts]
-        if self._local_to_global is not None:
+        extras = labels.pop("_extra_texts", None)
+        sampled = labels.pop("_ktw_sampled", False)
+        image_texts = labels.pop("_ktw_image_texts", None)
+        if image_texts is not None:
+            texts = [list(t) for t in image_texts]
+        else:
+            texts = [list(t) for t in self._active_texts]
+            if extras:
+                texts.extend(extras)
+        if self._local_to_global is not None and not sampled:
             cls = labels["cls"].flatten().astype(int)
             labels["cls"] = np.array([self._local_to_global.get(c, c) for c in cls]).reshape(labels["cls"].shape)
         if self.use_neg_queue and self.augment:
@@ -763,11 +1149,13 @@ class YOLOMultiModalDataset(YOLODataset):
             getattr(hyp, "use_neg_queue", False) or (isinstance(hyp, dict) and hyp.get("use_neg_queue"))
         ):
             self.use_neg_queue = True
-        # WeDetect (class_texts JSON / NegQueue): empty-string pad. YOLO-World/YOLOE: frequency negatives.
-        if self.use_neg_queue or self._class_texts is not None:
+        # WeDetect (class_texts JSON / NegQueue / nameless ktw-anno): empty-string pad.
+        # YOLO-World/YOLOE: frequency negatives.
+        if self.use_neg_queue or self._class_texts is not None or getattr(self, "ktw_open", False):
             if self.augment:
+                n_texts = 80 if getattr(self, "ktw_open", False) else min(max(len(self._active_texts), 1), 80)
                 transform = RandomLoadText(
-                    max_samples=min(max(len(self._active_texts), 1), 80),
+                    max_samples=n_texts,
                     padding=True,
                     padding_value=[""],
                 )
@@ -802,7 +1190,8 @@ class YOLOMultiModalDataset(YOLODataset):
     def neg_queue(self) -> _NegQueue:
         """Return (and lazily create) the negative text queue."""
         if self._neg_queue is None:
-            self._neg_queue = _NegQueue(size=min(len(self.class_texts), 80))
+            size = 80 if getattr(self, "ktw_open", False) else min(max(len(self.class_texts), 1), 80)
+            self._neg_queue = _NegQueue(size=size)
         return self._neg_queue
 
     @staticmethod
@@ -828,7 +1217,7 @@ def build_global_class_texts(datasets: list) -> list[list[str]]:
         (list[list[str]]): Unified global class texts. Empty if fewer than two multimodal datasets (caller should keep
             local texts).
     """
-    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset)]
+    multimodal = [ds for ds in datasets if isinstance(ds, YOLOMultiModalDataset) and not getattr(ds, "ktw_open", False)]
     if len(multimodal) < 2:
         for ds in multimodal:
             LOGGER.info(f"Single dataset '{ds.img_path}', using local class_texts ({len(ds.class_texts)} classes)")
@@ -1152,7 +1541,7 @@ class YOLOConcatDataset(ConcatDataset):
         return YOLODataset.collate_fn(batch)
 
     def close_mosaic(self, hyp: dict) -> None:
-        """Disable mosaic, copy_paste, mixup and cutmix augmentations by setting their probabilities to 0.0.
+        """Disable mosaic, copy_paste, mixup and cutmix augmentations by setting their values to 0.0.
 
         Args:
             hyp (dict): Hyperparameters for transforms.
@@ -1176,6 +1565,7 @@ class SemanticDataset(YOLODataset):
         data (dict): Dataset configuration from YAML.
         mask_files (list[str]): List of mask file paths corresponding to images.
         include_class (np.ndarray | None): Class ids to keep per pixel (None keeps all).
+        masks (dict[int, np.ndarray]): Resized masks of the images in the mosaic buffer, evicted with them.
     """
 
     format_class = SemanticFormat
@@ -1190,8 +1580,10 @@ class SemanticDataset(YOLODataset):
         """
         self.data = data or {}
         self.label_mapping = self._parse_label_mapping(self.data.get("label_mapping"))
+        self.label_lut, self.inverse_lut = self._build_label_luts()
         self.mask_files = []
         self.include_class = None
+        self.masks = {}  # masks of the buffered images, evicted with the image buffer
         super().__init__(*args, data=data, **kwargs)
 
     def update_labels(self, include_class: list[int] | None) -> None:
@@ -1234,6 +1626,16 @@ class SemanticDataset(YOLODataset):
             normalized[src] = dst
         return normalized
 
+    def _build_label_luts(self) -> tuple[np.ndarray, np.ndarray]:
+        """Build the 256-entry forward and inverse lookup tables for the dataset label mapping."""
+        forward, inverse = np.arange(256, dtype=np.uint8), np.arange(256, dtype=np.uint8)
+        for k, v in self.label_mapping.items():  # ids outside 0-255 never match a uint8 mask pixel
+            if 0 <= k < 256:
+                forward[k] = v
+            if 0 <= v < 256:
+                inverse[v] = k & 0xFF  # cityscapes maps -1; the inverse caller casts the result to uint8
+        return forward, inverse
+
     def get_label_files(self) -> list[str]:
         """Return the mask PNG paths paired with the dataset's images.
 
@@ -1250,7 +1652,7 @@ class SemanticDataset(YOLODataset):
             (str): Dataset cache hash.
         """
         mapping = json.dumps(self.label_mapping, sort_keys=True, separators=(",", ":"))
-        return get_hash(self.im_files + self.mask_files + [f"label_mapping:{mapping}", "mask_bit_depth"])
+        return get_hash(self.im_files + self.mask_files + [f"label_mapping:{mapping}"])
 
     def scan_summary(self, nf: int, nm: int, ne: int, nc: int) -> str:
         """Return a one-line summary of image-mask scan counters."""
@@ -1258,12 +1660,7 @@ class SemanticDataset(YOLODataset):
 
     def verify_args(self) -> tuple:
         """Return the mask verification function and its argument iterable."""
-        return verify_image_mask, zip(
-            self.im_files,
-            self.mask_files,
-            repeat(self.prefix),
-            repeat(int(self.data.get("nc", 0)) == 1),
-        )
+        return verify_image_mask, zip(self.im_files, self.mask_files, repeat(self.prefix))
 
     def result_to_label(self, result: tuple) -> tuple[dict | None, int, int, int, int, str]:
         """Convert one verify_image_mask result into a label dict and scan counter increments."""
@@ -1308,8 +1705,6 @@ class SemanticDataset(YOLODataset):
         mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             raise FileNotFoundError(f"Semantic mask not found or unreadable: {mask_file}")
-        if mask.ndim == 3:
-            mask = mask[..., 0]  # Windows patched cv2.imread expands grayscale reads to (H, W, 1)
         if int(self.data.get("nc", 0)) == 1 and self.labels[index]["is_1bit"]:
             mask[mask == 255] = 1  # cv2 expands 1-bit PNG foreground to 255.
         if self.label_mapping:
@@ -1320,26 +1715,19 @@ class SemanticDataset(YOLODataset):
         """Convert label values using the dataset's label mapping.
 
         Args:
-            label (np.ndarray): Segmentation label array to convert.
+            label (np.ndarray): Segmentation label array with integer ids in 0-255.
             inverse (bool): If True, apply inverse mapping (mapped -> original). Defaults to False.
 
         Returns:
-            (np.ndarray): Label array with converted values.
+            (np.ndarray): New uint8 array with converted values.
         """
-        temp = label.copy()
-        if inverse:
-            for v, k in self.label_mapping.items():
-                label[temp == k] = v
-        else:
-            for k, v in self.label_mapping.items():
-                label[temp == k] = v
-        return label
+        lut = self.inverse_lut if inverse else self.label_lut
+        return cv2.LUT(label, lut) if label.dtype == np.uint8 else lut[label]  # cv2.LUT needs a uint8 input
 
     def get_image_and_label(self, index):
         """Get image, label and semantic mask for the given index.
 
-        Overrides parent to include semantic mask so that Mosaic/CopyPaste mix images
-        also have their masks loaded.
+        Overrides parent to include the semantic mask, served from RAM for the images Mosaic draws from the buffer.
 
         Args:
             index (int): Dataset index.
@@ -1349,12 +1737,17 @@ class SemanticDataset(YOLODataset):
         """
         label = super().get_image_and_label(index)
         h, w = label["img"].shape[:2]
-        mask = self.load_mask(index, image_shape=(h, w))
-        if self.include_class is not None:  # keep only selected classes; remap the rest to the ignore label
-            mask[~np.isin(mask, self.include_class)] = 255
-        # Resize mask to match the resized image dimensions
-        if mask.shape[:2] != (h, w):
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        mask = self.masks.get(index)
+        if mask is None:
+            mask = self.load_mask(index, image_shape=(h, w))
+            if self.include_class is not None:  # keep only selected classes; remap the rest to the ignore label
+                mask[~np.isin(mask, self.include_class)] = 255
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            if index in self.buffer:  # image is RAM-resident for mosaic reuse, keep its mask with it
+                self.masks[index] = mask
+                if len(self.masks) > len(self.buffer):
+                    self.masks = {i: self.masks[i] for i in self.buffer if i in self.masks}
         label["semantic_mask"] = mask
         return label
 
@@ -1430,18 +1823,15 @@ class ClassificationDataset:
         torch_transforms (callable): PyTorch transforms to be applied to the images.
         root (str): Root directory of the dataset.
         prefix (str): Prefix for logging and cache filenames.
-        img_cache (np.ndarray): Contiguous uint8 buffer holding all cached images when caching in RAM.
-        img_offsets (np.ndarray): Flat offset of each image within img_cache.
-        img_shapes (list): (h, w, c) shape of each cached image.
 
     Methods:
         __getitem__: Return transformed image and class index for the given sample index.
         __len__: Return the total number of samples in the dataset.
         verify_images: Verify all images in dataset.
-        cache_images: Decode all images once into a single contiguous RAM buffer.
+        cache_images: Decode images into one contiguous RAM cache.
     """
 
-    def __init__(self, root: str, args, augment: bool = False, prefix: str = ""):
+    def __init__(self, root: str, args, augment: bool = False, prefix: str = "", names: dict[int, str] | None = None):
         """Initialize YOLO classification dataset with root directory, arguments, augmentations, and cache settings.
 
         Args:
@@ -1450,6 +1840,8 @@ class ClassificationDataset:
                 parameters, and cache settings.
             augment (bool, optional): Whether to apply augmentations to the dataset.
             prefix (str, optional): Prefix for logging and cache filenames, aiding in dataset identification.
+            names (dict[int, str], optional): Model class names; class folders are aligned to this order by name and
+                folders the model lacks are dropped, since each split's ImageFolder scan is indexed on its own.
         """
         import torchvision  # scope for faster 'import ultralytics'
 
@@ -1463,16 +1855,33 @@ class ClassificationDataset:
         self.root = self.base.root
 
         # Initialize attributes
-        if augment and args.fraction < 1.0:  # reduce training fraction
-            self.samples = self.samples[: round(len(self.samples) * args.fraction)]
+        fraction = 1.0 if is_ndjson else get_split_fraction(args.fraction, prefix or ("train" if augment else "val"))
+        count = fraction if isinstance(fraction, int) else max(int(fraction > 0), round(len(self.samples) * fraction))
+        self.samples = (
+            [self.samples[i] for i in np.linspace(0, len(self.samples) - 1, count, dtype=int)]
+            if count < len(self.samples)
+            else self.samples
+        )
         self.prefix = colorstr(f"{prefix}: ") if prefix else ""
         self.cache_ram = args.cache is True or str(args.cache).lower() == "ram"  # cache images into RAM
         self.cache_disk = str(args.cache).lower() == "disk"  # cache images on hard drive as uncompressed *.npy files
         self.samples = self.verify_images()  # filter out bad images
-        if is_ndjson:
-            self.samples = [(f, int(Path(f).parent.name)) for f, _ in self.samples]
+        classes = self.base.classes  # this split's class folders, sorted, indexed by the ImageFolder target
         if args.single_cls:
-            self.samples = [(f, 0) for f, _ in self.samples]
+            index = dict.fromkeys(classes, 0)
+        elif is_ndjson:  # folders are the class ids
+            index = {c: int(c) for c in classes}
+        elif names and not set(classes).isdisjoint(names.values()):  # align to the model's class order by name
+            index = {n: i for i, n in names.items()}
+        else:  # folder names carry no class meaning, e.g. ImageNet wnids under humanized names
+            index = {c: i for i, c in enumerate(classes)}
+        extra = {c for c in classes if index.get(c, len(names)) >= len(names)} if names else set()  # not in the model
+        n = len(self.samples)
+        self.samples = [(f, index[classes[t]]) for f, t in self.samples if classes[t] not in extra]
+        if extra:
+            LOGGER.warning(
+                f"{self.prefix}Skipping {n - len(self.samples)} samples from classes the model lacks: {sorted(extra)}"
+            )
         self.samples = [[*list(x), Path(x[0]).with_suffix(".npy"), None] for x in self.samples]  # file, index, npy, im
         if self.cache_ram:
             self.cache_images()
@@ -1504,9 +1913,7 @@ class ClassificationDataset:
         """
         f, j, fn, im = self.samples[i]  # filename, index, filename.with_suffix('.npy'), image
         if self.cache_ram:
-            h, w, c = self.img_shapes[i]
-            pos = self.img_offsets[i]
-            im = self.img_cache[pos : pos + h * w * c].reshape(h, w, c)  # zero-copy view
+            im = self.img_cache[i]
         elif self.cache_disk:
             if not fn.exists():  # load npy
                 np.save(fn.as_posix(), cv2.imread(f), allow_pickle=False)
@@ -1526,7 +1933,7 @@ class ClassificationDataset:
         """Decode all images once into a single contiguous uint8 buffer before DataLoader workers fork.
 
         A Python list of per-image arrays is duplicated into every forked worker by copy-on-write refcounting
-        (https://github.com/ultralytics/ultralytics/issues/9824); one shared numpy buffer is read-only across
+        (https://github.com/ultralytics/ultralytics/issues/9824); one shared buffer is read-only across
         workers instead, so RAM stays flat. Original image sizes are preserved for the transforms.
         """
         with ThreadPool(NUM_THREADS) as pool:
@@ -1538,9 +1945,7 @@ class ClassificationDataset:
                     disable=LOCAL_RANK > 0,
                 )
             )
-        self.img_shapes = [im.shape for im in ims]
-        self.img_offsets = np.cumsum([0] + [im.size for im in ims[:-1]])
-        self.img_cache = np.concatenate([im.reshape(-1) for im in ims])
+        self.img_cache = BaseDataset._ImageCache(ims)
 
     def verify_images(self) -> list[tuple]:
         """Verify all images in dataset.
@@ -1555,7 +1960,7 @@ class ClassificationDataset:
             check_file_speeds([file for (file, _) in self.samples[:5]], prefix=self.prefix)  # check image read speeds
             cache = load_dataset_cache_file(path)  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
-            assert cache["hash"] == get_hash([x[0] for x in self.samples])  # identical hash
+            assert cache["hash"] == get_hash([x[0] for x in self.samples] + self.base.classes)  # files and classes
             nf, nc, n, samples = cache.pop("results")  # found, corrupt, total, samples
             if LOCAL_RANK in {-1, 0}:
                 d = f"{desc} {nf} images, {nc} corrupt"
@@ -1582,7 +1987,7 @@ class ClassificationDataset:
                 pbar.close()
             if msgs:
                 LOGGER.info("\n".join(msgs))
-            x["hash"] = get_hash([x[0] for x in self.samples])
+            x["hash"] = get_hash([x[0] for x in self.samples] + self.base.classes)
             x["results"] = nf, nc, len(samples), samples
             x["msgs"] = msgs  # warnings
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)

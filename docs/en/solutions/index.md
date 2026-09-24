@@ -9,7 +9,7 @@ keywords: Ultralytics, YOLO26, object counting, object blurring, security system
 
 Ultralytics Solutions provide cutting-edge applications of YOLO models, offering real-world solutions like object counting, blurring, and security systems, enhancing efficiency and [accuracy](https://www.ultralytics.com/glossary/accuracy) in diverse industries. Discover the power of YOLO26 for practical, impactful implementations.
 
-![Ultralytics Solutions Thumbnail](https://cdn.jsdelivr.net/gh/ultralytics/assets@main/docs/ultralytics-solutions-thumbnail.avif)
+![Ultralytics Solutions Thumbnail](https://cdn.ul.run/i/af2a06dd04b546ae345e818580d16e7e.avif)
 
 <p align="center">
   <br>
@@ -51,17 +51,16 @@ Here's our curated list of Ultralytics solutions that can be used to create awes
 
 !!! note "Track args"
 
-     Solutions also support some of the arguments from `track`, including parameters such as `conf`, `line_width`, `tracker`, `model`, `show`, `verbose` and `classes`.
+    Solutions forward the inference and tracking arguments below to `model.track()`.
 
-{% from "macros/track-args.md" import param_table %}
-{{ param_table(["tracker", "conf", "iou", "classes", "verbose", "device"]) }}
+{% include "macros/solutions-track-args.md" %}
 
 !!! note "Visualization args"
 
     You can use `show_conf`, `show_labels`, and other mentioned arguments to customize the visualization.
 
 {% from "macros/visualization-args.md" import param_table %}
-{{ param_table(["show", "line_width", "show_conf", "show_labels"]) }}
+{{ param_table(["show", "show_conf", "show_labels"]) }}
 
 ### Usage of SolutionAnnotator
 
@@ -140,9 +139,7 @@ For more details, refer to the [`SolutionResults` class documentation](../refere
 
 !!! tip "Command Info"
 
-    Most of the Solutions can be used directly through the command-line interface, including:
-
-    `Count`, `Crop`, `Blur`, `Workout`, `Heatmap`, `Isegment`, `Visioneye`, `Speed`, `Queue`, `Analytics`, `Inference`, `Trackzone`
+    Most of the Solutions can be used directly through the command-line interface.
 
     **Syntax**
 

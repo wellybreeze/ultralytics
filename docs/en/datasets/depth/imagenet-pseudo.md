@@ -1,5 +1,8 @@
 ---
 comments: true
+license:
+    name: Research-Only
+    url: https://www.image-net.org/download.php
 description: Explore the pseudo-labeled ImageNet depth dataset used for knowledge distillation in YOLO26-Depth. Learn how pseudo depth labels are generated, its role, usage, and pretrained models.
 keywords: ImageNet, pseudo-labeled depth, knowledge distillation, monocular depth estimation, Depth Anything, YOLO26-Depth, depth pretraining, Ultralytics
 ---
@@ -29,7 +32,7 @@ Because ImageNet ships without depth annotations, depth targets are produced off
 
 1. Each ImageNet training image is run through `depth-anything/DA3MONO-LARGE`, which predicts a highly detailed depth map that is only defined up to an unknown per-image scale and shift, and through `depth-anything/DA3METRIC-LARGE`, whose output is coarser but in real units.
 2. A per-image robust affine fit maps the monocular prediction onto the metric one, `label = a * mono + b`. Every per-pixel detail therefore comes from the monocular checkpoint, while the metric checkpoint only sets the two scalars that place the map on the meter axis. No camera intrinsics are involved, so images without calibration can be labeled.
-3. The result is saved as a `.npy` array in meters, following the [Ultralytics depth dataset format](index.md), and paired with its source image by file stem. These maps are stored as float16 to halve the on-disk footprint across 1.28M files; the dataset loader casts them to float32 on read, and float32 remains the documented format for custom depth datasets.
+3. The result is saved as a 16-bit millimeter PNG, following the [Ultralytics depth dataset format](index.md), and paired with its source image by file stem.
 4. The pseudo-labeled pairs are then added as one component of a larger training mix, where a student YOLO26-Depth model learns to match the teacher while also training on real ground-truth sources.
 
 Because the scale comes from a prediction rather than a measurement, each map can carry a global scale error. YOLO26-Depth trains with a scale-invariant log (SILog) loss plus gradient matching and validates with median alignment, so a per-image scale offset in the pseudo labels is largely absorbed.
@@ -101,3 +104,17 @@ If you use the ImageNet dataset in your research or development work, please cit
         ```
 
 We would like to acknowledge the ImageNet team for creating and maintaining the dataset, and the authors of Depth Anything 3 for the teacher models used to generate the pseudo depth labels.
+
+## FAQ
+
+### What is the pseudo-labeled ImageNet depth dataset?
+
+It reuses the 1,281,167 ImageNet-1K training images, which have no measured depth, and pairs each one with a depth map predicted by a Depth Anything 3 teacher. It is the single largest source in the roughly 2.19M-image YOLO26-Depth pretraining mix (about 58%) and is used purely for knowledge distillation and scene diversity.
+
+### How are the pseudo depth labels generated?
+
+Each image is run through `DA3MONO-LARGE` for detailed relative structure and `DA3METRIC-LARGE` for metric scale. A per-image robust affine fit maps the monocular prediction onto the metric one, and the result is saved as a 16-bit millimeter PNG in the [Ultralytics depth format](index.md). See [How the pseudo-labels are generated](#how-the-pseudo-labels-are-generated) for details.
+
+### Can I download the pseudo-labeled ImageNet depth data?
+
+No. This source is part of the internal mixed-training configuration behind the released YOLO26-Depth weights and is not distributed as a standalone download. To build a similar set, generate pseudo labels for your own images with a depth teacher and store them in the standard depth layout.

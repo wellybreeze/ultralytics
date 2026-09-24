@@ -77,6 +77,7 @@ class WeDetectTrainer(DetectionTrainer):
             overrides["freeze_text_encoder"] = True
         self.training_data = None  # filled by get_dataset() for mixed yaml
         self.validation_data = None  # path -> data dict for mixed multi-val
+        self.validation_sets = None  # list[(val_img_path, data_dict)]; keeps duplicate paths
         self._val_fitness_weights_cfg = None  # optional list from mixed yaml
         self._val_fitness_dynamic = False  # epoch 2+ reweight by prior val mAP50-95
         self._val_fitness_lvis_target_mult = 2.0
@@ -110,6 +111,8 @@ class WeDetectTrainer(DetectionTrainer):
         assigner must use the text-slot count, not annotated ``nc`` alone.
         """
         nc = int(self.data.get("nc") or 80)
+        if self.data.get("_ktw_auto_names"):
+            nc = max(nc, 80)  # nameless ktw-anno: RandomLoadText uses up to 80 per-image slots
         override = getattr(self, "_train_data_override", None)
         if isinstance(override, dict) and override.get("nc"):
             nc = max(nc, int(override["nc"]))
@@ -293,6 +296,7 @@ class WeDetectTrainer(DetectionTrainer):
                 data = super().get_dataset()
                 self.training_data = None
                 self.validation_data = None
+                self.validation_sets = None
                 self.data = data  # required before pseudo-label hook
                 with torch_distributed_zero_first(LOCAL_RANK):
                     maybe_build_pseudo_labels(self)
@@ -305,21 +309,30 @@ class WeDetectTrainer(DetectionTrainer):
         data = super().get_dataset()
         self.training_data = None
         self.validation_data = None
+        self.validation_sets = None
         self.data = data  # required before pseudo-label hook
         with torch_distributed_zero_first(LOCAL_RANK):
             maybe_build_pseudo_labels(self)
         return data
 
     @staticmethod
-    def _resolve_val_img_path(d: dict) -> str:
-        """Pick val image list path; LVIS-style configs prefer ``minival`` when present."""
-        if d.get("minival") is not None:
+    def _resolve_val_img_path(d: dict, split: str = "val") -> str:
+        """Pick val image list. Use ``minival`` only when ``split=minival`` and the yaml defines that key."""
+        split = (split or "val").strip().lower()
+        if split == "minival" and d.get("minival") is not None:
             mv = d["minival"]
             if not Path(str(mv)).is_absolute():
                 d["minival"] = str(Path(d["path"]) / mv)
-            if "lvis" in str(d.get("val", "")).lower() or "lvis" in str(d.get("path", "")).lower():
-                return str(d["minival"])
+            return str(d["minival"])
         return str(d["val"])
+
+    @staticmethod
+    def _eval_split(d: dict, split: str = "val") -> str:
+        """Standalone ``final_eval`` split: honor ``args.split``; ``minival`` only if the yaml defines it."""
+        split = (split or "val").strip().lower()
+        if split == "minival" and d.get("minival") is not None:
+            return "minival"
+        return "val"
 
     @staticmethod
     def _val_metric_tag(d: dict, index: int) -> str:
@@ -327,6 +340,21 @@ class WeDetectTrainer(DetectionTrainer):
         path = Path(str(d.get("path", f"val{index}")))
         tag = path.name.strip() or f"val{index}"
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)
+
+    def _bind_validator_save_dir(self, tag: str, root: Path | None = None, mkdir: bool | None = None) -> None:
+        """Point validator plots at ``<save_dir>/<tag>/``.
+
+        ``BaseValidator`` only writes confusion/Box/val-batch on the last epoch (or early-stop).
+        Do not mkdir on earlier epochs: ``validator.args.plots`` is still True before that gate.
+        """
+        d = Path(root or self.save_dir) / tag
+        if mkdir is None:
+            last = int(getattr(self, "epoch", -1)) >= int(getattr(self, "epochs", 1)) - 1
+            possible = bool(getattr(getattr(self, "stopper", None), "possible_stop", False))
+            mkdir = bool(self.validator.args.save_json) or (bool(self.args.plots) and (last or possible))
+        if mkdir:
+            d.mkdir(parents=True, exist_ok=True)
+        self.validator.save_dir = d
 
     def _get_mixed_dataset(self, data_yaml: dict) -> dict:
         """Process mixed data config with ``yolo_data`` + optional ``grounding_data``.
@@ -374,12 +402,18 @@ class WeDetectTrainer(DetectionTrainer):
 
         # Per-val metadata (multi-val); fitness combines all sets (equal weights by default)
         self.validation_data = {}
-        for d, vpath in zip(data["val"], final_data["val"]):
+        self.validation_sets = []
+        val_yamls = list((data_yaml.get("val") or {}).get("yolo_data") or [])
+        for i, (d, vpath) in enumerate(zip(data["val"], final_data["val"])):
             if self.args.single_cls:
                 d = dict(d)
                 d["names"] = {0: "object"}
                 d["nc"] = 1
-            self.validation_data[str(vpath)] = d
+            if not d.get("yaml_file") and i < len(val_yamls):
+                d["yaml_file"] = str(val_yamls[i])
+            vpath = str(vpath)
+            self.validation_sets.append((vpath, d))
+            self.validation_data[vpath] = d
         # Optional per-set weights from mixed yaml: val_fitness_weights: [0.5, 0.3, 0.2]
         self._val_fitness_weights_cfg = data_yaml.get("val_fitness_weights")
         self._val_fitness_dynamic = bool(
@@ -406,6 +440,8 @@ class WeDetectTrainer(DetectionTrainer):
         final_data["names"] = primary["names"]
         final_data["path"] = primary["path"]
         final_data["channels"] = primary["channels"]
+        if primary.get("_ktw_auto_names"):
+            final_data["_ktw_auto_names"] = True
         if "class_texts" in primary:
             final_data["class_texts"] = primary["class_texts"]
         self.data = final_data
@@ -446,7 +482,7 @@ class WeDetectTrainer(DetectionTrainer):
             if use_neg:
                 d["use_neg_queue"] = True
             self.training_data[d["train"]] = d
-        n_val = len(self.validation_data)
+        n_val = len(self.validation_sets or self.validation_data or {})
         w = self._val_fitness_weights(n_val)
         dyn = f", dynamic={'on' if self._val_fitness_dynamic else 'off'}" if n_val > 1 else ""
         LOGGER.info(
@@ -547,7 +583,7 @@ class WeDetectTrainer(DetectionTrainer):
 
         from ultralytics.utils import LOCAL_RANK
 
-        val_items = list(self.validation_data.items()) if self.validation_data else []
+        val_items = self._val_items()
         if len(val_items) <= 1:
             return super().validate()
 
@@ -563,6 +599,7 @@ class WeDetectTrainer(DetectionTrainer):
         saved = {k: self.data.get(k) for k in primary_keys}
         saved_loader = self.validator.dataloader
         saved_test_loader = self.test_loader
+        saved_save_dir = self.validator.save_dir
 
         metrics_all: dict[str, float] = {}
         fitnesses: list[float] = []
@@ -584,6 +621,8 @@ class WeDetectTrainer(DetectionTrainer):
                 self.test_loader = loader
 
                 tag = self._val_metric_tag(vdata, i)
+                self.validator.args.plots = self.args.plots  # BaseValidator &= last-epoch; reset per val set
+                self._bind_validator_save_dir(tag, saved_save_dir)
                 LOGGER.info(f"{colorstr('WeDetect val:')} [{i + 1}/{len(val_items)}] {tag} (nc={vdata['nc']})")
                 metrics = self.validator(self)
                 if metrics is None:  # non-zero DDP ranks
@@ -612,6 +651,7 @@ class WeDetectTrainer(DetectionTrainer):
                     self.data[k] = v
             self.validator.dataloader = saved_loader
             self.test_loader = saved_test_loader
+            self.validator.save_dir = saved_save_dir
 
         if not fitnesses:
             return None, None
@@ -630,16 +670,31 @@ class WeDetectTrainer(DetectionTrainer):
             self._update_dynamic_val_fitness_weights(fitnesses, val_vdata)
         return metrics_all, combined
 
+    def _val_items(self) -> list[tuple[str, dict]]:
+        """Mixed val subsets in yaml order. List form keeps two sets that share an image path."""
+        sets = getattr(self, "validation_sets", None)
+        if sets:
+            return list(sets)
+        return list((self.validation_data or {}).items())
+
+    def _mixed_val_yaml_paths(self) -> list[str]:
+        """Source of truth for train-end / standalone mixed val: ``val.yolo_data``."""
+        from ultralytics.models.yolo.wedetect.val import mixed_val_yaml_paths
+
+        paths = mixed_val_yaml_paths(self.args.data)
+        if paths:
+            return paths
+        return [str(v.get("yaml_file")) for _, v in self._val_items() if v.get("yaml_file")]
+
     def final_eval(self):
         """Final val on ``best.pt`` across all mixed val sets (weighted fitness).
 
         During training ``get_dataset`` replaces ``args.data`` with the mixed yaml
         dict. Standalone ``validator(model=best.pt)`` needs concrete yaml paths.
         """
-        from ultralytics.utils.torch_utils import strip_optimizer
-
-        val_items = list(self.validation_data.items()) if self.validation_data else []
-        if len(val_items) <= 1:
+        yaml_paths = self._mixed_val_yaml_paths()
+        val_items = self._val_items()
+        if len(yaml_paths) <= 1 and len(val_items) <= 1:
             data = self.args.data
             if isinstance(data, dict):
                 val = None
@@ -650,17 +705,22 @@ class WeDetectTrainer(DetectionTrainer):
                     val = data["yaml_file"]
                 if val:
                     self.validator.args.data = val
-                    self.validator.args.split = (
-                        "minival" if isinstance(val, str) and "lvis" in str(val).lower() else "val"
+                    # Prefer resolved subset dict (has minival after check_det_dataset), not the mixed yaml
+                    self.validator.args.split = self._eval_split(
+                        self.data if isinstance(getattr(self, "data", None), dict) else {}
                     )
             return super().final_eval()
 
-        model = self.best if self.best.exists() else None
-        with torch_distributed_zero_first(LOCAL_RANK):
-            if RANK in {-1, 0}:
-                ckpt = strip_optimizer(self.last) if self.last.exists() else {}
-                if model:
-                    strip_optimizer(self.best, updates={"train_results": ckpt.get("train_results")})
+        if len(yaml_paths) > 1:
+            aligned = []
+            for i, p in enumerate(yaml_paths):
+                vp, vd = val_items[i] if i < len(val_items) else (str(p), {})
+                vd = dict(vd) if vd else {}
+                vd.setdefault("yaml_file", str(p))
+                aligned.append((vp, vd))
+            val_items = aligned
+
+        model = self._strip_train_checkpoints()
         if not model:
             return
 
@@ -671,29 +731,34 @@ class WeDetectTrainer(DetectionTrainer):
         metrics_all: dict[str, float] = {}
         fitnesses: list[float] = []
         tags: list[str] = []
-        for i, (_val_path, vdata) in enumerate(val_items):
-            yaml_path = vdata.get("yaml_file")
-            if not yaml_path and isinstance(self.args.data, dict):
-                yolo_data = (self.args.data.get("val") or {}).get("yolo_data") or []
-                yaml_path = yolo_data[i] if i < len(yolo_data) else None
-            if not yaml_path:
-                LOGGER.warning(f"{colorstr('WeDetect:')} skip final val set {i}: no yaml_file")
-                continue
-            self.validator.args.data = str(yaml_path)
-            self.validator.args.split = "minival" if "lvis" in str(yaml_path).lower() else "val"
-            tag = self._val_metric_tag(vdata, i)
-            LOGGER.info(f"{colorstr('WeDetect val:')} final [{i + 1}/{len(val_items)}] {tag}")
-            metrics = self.validator(model=model)
-            if metrics is None:
-                continue
-            fit = float(metrics.pop("fitness", 0.0) or 0.0)
-            fitnesses.append(fit)
-            tags.append(tag)
-            if i == 0:
-                metrics_all.update(metrics)
-            for k, v in metrics.items():
-                metrics_all[f"{tag}/{k}"] = v
-            metrics_all[f"{tag}/fitness"] = fit
+        saved_save_dir = self.validator.save_dir
+        try:
+            for i, (_val_path, vdata) in enumerate(val_items):
+                yaml_path = vdata.get("yaml_file")
+                if not yaml_path and isinstance(self.args.data, dict):
+                    yolo_data = (self.args.data.get("val") or {}).get("yolo_data") or []
+                    yaml_path = yolo_data[i] if i < len(yolo_data) else None
+                if not yaml_path:
+                    LOGGER.warning(f"{colorstr('WeDetect:')} skip final val set {i}: no yaml_file")
+                    continue
+                self.validator.args.data = str(yaml_path)
+                self.validator.args.split = self._eval_split(vdata)
+                tag = self._val_metric_tag(vdata, i)
+                self._bind_validator_save_dir(tag, saved_save_dir)
+                LOGGER.info(f"{colorstr('WeDetect val:')} final [{i + 1}/{len(val_items)}] {tag}")
+                metrics = self.validator(model=model)
+                if metrics is None:
+                    continue
+                fit = float(metrics.pop("fitness", 0.0) or 0.0)
+                fitnesses.append(fit)
+                tags.append(tag)
+                if i == 0:
+                    metrics_all.update(metrics)
+                for k, v in metrics.items():
+                    metrics_all[f"{tag}/{k}"] = v
+                metrics_all[f"{tag}/fitness"] = fit
+        finally:
+            self.validator.save_dir = saved_save_dir
 
         if fitnesses:
             weights = self._val_fitness_weights(len(fitnesses))
@@ -737,17 +802,37 @@ class WeDetectTrainer(DetectionTrainer):
         if mode == "train" and getattr(self, "_train_data_override", None) is not None:
             data = self._train_data_override
         elif mode == "val" and isinstance(data, dict):
+            vdata = (getattr(self, "validation_data", None) or {}).get(str(img_path))
+            if vdata:
+                data = vdata
             # Ensure val reads original GT labels even if train override set labels_dir
             data = {**data, "labels_dir": "labels"}
 
         dataset = build_yolo_dataset(
             self.args, img_path, batch, data, mode=mode, rect=mode == "val", stride=gs, multi_modal=mode == "train"
         )
+        if mode == "val":
+            self._publish_ktw_val_names(dataset, img_path)
         if mode == "train" and bool(getattr(self.args, "use_neg_queue", False)):
             attach_shared_neg_queue([dataset], size=80)
         if mode == "train" and self.freeze_text_encoder:
             self.set_text_embeddings([dataset], batch)
         return dataset
+
+    def _publish_ktw_val_names(self, dataset, img_path) -> None:
+        """Copy ktw-anno inferred val names onto trainer.data so WeDetect prompts match GT class ids."""
+        d = getattr(dataset, "data", None)
+        if not isinstance(d, dict) or not d.get("names"):
+            return
+        self.data["names"] = d["names"]
+        self.data["nc"] = d.get("nc", len(d["names"]))
+        if d.get("_ktw_auto_names"):
+            self.data["_ktw_auto_names"] = True
+        key = str(img_path)
+        vdata = (getattr(self, "validation_data", None) or {}).get(key)
+        if vdata is not None:
+            vdata["names"] = d["names"]
+            vdata["nc"] = self.data["nc"]
 
     def set_text_embeddings(self, datasets: list[Any], batch: int | None) -> None:
         """Set text embeddings for datasets to accelerate training."""

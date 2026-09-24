@@ -1794,7 +1794,7 @@ def _dedup_mode(gt_label_files: list[str]) -> str:
 
 
 def _merged_cache_iou_ok(path: Path, dedup: str) -> bool:
-    """ktw-anno merged caches must record the IoU threshold; older class-only caches miss."""
+    """Ktw-anno merged caches must record the IoU threshold; older class-only caches miss."""
     if not str(dedup).startswith("ktw_iou_"):
         return True
     try:
@@ -1878,8 +1878,8 @@ def _merge_ktw_iou(
 ) -> tuple[np.ndarray, np.ndarray, list[list[str]]]:
     """Collapse boxes with IoU > ``iou_thr`` into one box; labels are the union.
 
-    Geometry stays on a GT box when the cluster contains one (largest area, then earliest index).
-    Pseudo-only clusters keep the largest box.
+    Geometry stays on a GT box when the cluster contains one (largest area, then earliest index). Pseudo-only clusters
+    keep the largest box.
     """
     n = len(boxes)
     if n <= 1:
@@ -1915,8 +1915,8 @@ def merge_gt_and_pseudo_entries(
 ) -> tuple[list[dict], int]:
     """Concatenate GT + already-remapped pseudo boxes per image.
 
-    ktw-anno (``instance_labels`` present) additionally merges boxes with IoU > ``iou_thr`` into one physical box
-    whose ``instance_labels`` is the union of the overlapping tags. Other datasets stay class-level concat.
+    ktw-anno (``instance_labels`` present) additionally merges boxes with IoU > ``iou_thr`` into one physical box whose
+    ``instance_labels`` is the union of the overlapping tags. Other datasets stay class-level concat.
 
     Returns:
         (merged entries, n_pseudo_boxes before spatial merge).

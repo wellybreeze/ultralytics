@@ -45,6 +45,8 @@ __all__ = (  # noqa: PLE0604
 
 if TYPE_CHECKING:
     # Enable hints for type checkers
+    from ultralytics_platform import APIConnectionError, APIError, AsyncPlatform, Platform  # noqa: F401
+
     from ultralytics.models import (
         DFINE,
         LLM,
@@ -59,7 +61,6 @@ if TYPE_CHECKING:
         WeDetectUni,
         YOLOWorld,
     )
-    from ultralytics_platform import APIConnectionError, APIError, AsyncPlatform, Platform  # noqa: F401
 
 
 def __getattr__(name: str):

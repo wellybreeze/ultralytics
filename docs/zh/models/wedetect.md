@@ -31,11 +31,11 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 ### Zero-shot
 
-| 模型 | 骨干 | 语言塔 | 分辨率 | AP<sup>minival</sup> | COCO AP | 参数量 | FPS | 配置 |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| [WeDetect-Tiny](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_tiny.pt) | ConvNeXt-T | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **37.4** | 44.9 | 33M | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml) |
-| [WeDetect-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt) | ConvNeXt-B | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | 640×640 | **47.3** | 52.1 | 176M | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml) |
-| [WeDetect-Large](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 | **55.0** | 54.5 | 490M | 6.0 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
+|                                                       模型                                                       |    骨干    |                               语言塔                               |  分辨率   | AP<sup>minival</sup> | COCO AP | 参数量 | FPS  |                                 配置                                 |
+| :--------------------------------------------------------------------------------------------------------------: | :--------: | :----------------------------------------------------------------: | :-------: | :------------------: | :-----: | :----: | :--: | :------------------------------------------------------------------: |
+|  [WeDetect-Tiny](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_tiny.pt)  | ConvNeXt-T |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **37.4**       |  44.9   |  33M   | 62.5 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-tiny.yaml)  |
+|  [WeDetect-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base.pt)  | ConvNeXt-B |  [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |  640×640  |       **47.3**       |  52.1   |  176M  | 35.1 | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-base.yaml)  |
+| [WeDetect-Large](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_large.pt) | ConvNeXt-L | [XLM-R-large](https://huggingface.co/FacebookAI/xlm-roberta-large) | 1280×1280 |       **55.0**       |  54.5   |  490M  | 6.0  | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-large.yaml) |
 
 <details>
 <summary><strong>分项指标（LVIS / COCO / ODInW）</strong></summary>
@@ -52,9 +52,9 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 推理不走在线 LM，使用可学习 prompt embedding（更快，不能按 `set_classes` 任意换开放词汇提示）。
 
-| 模型 | 语言塔（仅训练初始化） | 配置 |
-| :---: | :---: | :---: |
-| [WeDetect-Uni-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml) |
+|                                                           模型                                                           |                      语言塔（仅训练初始化）                      |                                   配置                                   |
+| :----------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------: | :----------------------------------------------------------------------: |
+|  [WeDetect-Uni-Base](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_base_uni.pt)  | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-base.yaml)  |
 | [WeDetect-Uni-Large](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/resolve/master/wedetect_large_uni.pt) | [XLM-R-base](https://huggingface.co/FacebookAI/xlm-roberta-base) | [yaml](../../../ultralytics/cfg/models/wedetect/wedetect-uni-large.yaml) |
 
 **注意：**
@@ -68,11 +68,11 @@ keywords: WeDetect, 开放词汇, XLM-RoBERTa, ConvNeXt, Ultralytics, 目标检�
 
 语言塔把类别提示词编成 768 维向量，再与检测头做对比。YAML 的 `text_model` 决定结构；[ModelScope](https://www.modelscope.cn/models/changsu/wedetect-ultralytics/files) 的 `.pt` 通过顶层 `text_model_weights` 载入 WeDetect 训练过的编码器与投影头。分词器 / `config.json` 仍来自 Hugging Face（或本地镜像），**不是**检测权重的一部分。
 
-|          WeDetect          |  YAML `text_model`  |      语言塔       | 隐层 → 投影 |                       用途                       |                                        链接                                         |
-| :------------------------: | :-----------------: | :---------------: | :---------: | :----------------------------------------------: | :---------------------------------------------------------------------------------: |
-|        Tiny / Base         | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  |                  推理 + OV 微调                  |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
-|       Large / XLarge       | `xlm-roberta:large` | XLM-RoBERTa-large | 1024 → 768  |                  推理 + OV 微调                  | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) |
-|     Uni（base / large）      | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  | **仅训练**时初始化可学习 prompt；推理不再加载 LM |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
+|      WeDetect       |  YAML `text_model`  |      语言塔       | 隐层 → 投影 |                       用途                       |                                        链接                                         |
+| :-----------------: | :-----------------: | :---------------: | :---------: | :----------------------------------------------: | :---------------------------------------------------------------------------------: |
+|     Tiny / Base     | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  |                  推理 + OV 微调                  |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
+|   Large / XLarge    | `xlm-roberta:large` | XLM-RoBERTa-large | 1024 → 768  |                  推理 + OV 微调                  | [FacebookAI/xlm-roberta-large](https://huggingface.co/FacebookAI/xlm-roberta-large) |
+| Uni（base / large） | `xlm-roberta:base`  | XLM-RoBERTa-base  |  768 → 768  | **仅训练**时初始化可学习 prompt；推理不再加载 LM |  [FacebookAI/xlm-roberta-base](https://huggingface.co/FacebookAI/xlm-roberta-base)  |
 
 XLM-RoBERTa 在约 100 种语言的 CommonCrawl 上预训练（论文：[Unsupervised Cross-lingual Representation Learning at Scale](https://arxiv.org/abs/1911.02116)；文档：[Transformers · XLM-RoBERTa](https://huggingface.co/docs/transformers/model_doc/xlm-roberta)），因此中文 / 多语 `class_texts` 可直接使用。Large 文本塔隐层为 1024，经线性头投到 768，与 `WeDetectDetect` 的 `embed` 对齐。
 

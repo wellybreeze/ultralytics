@@ -75,10 +75,9 @@ def resolve_wedetect_class_names(data: dict) -> list[str]:
 def ktw_realign_val_names(data: dict | None, model_names) -> list[str] | None:
     """Return JSON-inferred val class names when they disagree with the model vocab.
 
-    YAML without ``names`` uses a placeholder ``object`` class. The val dataset then fills
-    ``data["names"]`` from unique ktw-anno tags. Confusion-matrix ``nc`` and text prompts must
-    follow those inferred names; using the placeholder yields ``IndexError`` on GT class ids.
-    Closed-set YAML / ``class_texts`` vocabs are left unchanged.
+    YAML without ``names`` uses a placeholder ``object`` class. The val dataset then fills ``data["names"]`` from unique
+    ktw-anno tags. Confusion-matrix ``nc`` and text prompts must follow those inferred names; using the placeholder
+    yields ``IndexError`` on GT class ids. Closed-set YAML / ``class_texts`` vocabs are left unchanged.
     """
     if not isinstance(data, dict):
         return None
@@ -101,9 +100,9 @@ def ktw_realign_val_names(data: dict | None, model_names) -> list[str] | None:
 def _wedetect_prompt_owner(model):
     """Return the module that can encode WeDetect prompts.
 
-    Standalone ``model.val()`` wraps the detector in ``AutoBackend``. ``unwrap_model`` does not
-    strip that wrapper, and ``PyTorchBackend`` has no ``set_classes``. Prefer the dual backend
-    (it owns ``set_classes``), then the inner ``WeDetectModel``.
+    Standalone ``model.val()`` wraps the detector in ``AutoBackend``. ``unwrap_model`` does not strip that wrapper, and
+    ``PyTorchBackend`` has no ``set_classes``. Prefer the dual backend (it owns ``set_classes``), then the inner
+    ``WeDetectModel``.
     """
     m = unwrap_model(model)
     if callable(getattr(m, "set_classes", None)):

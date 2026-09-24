@@ -64,7 +64,7 @@ def test_ktw_plot_instances_counts_all_tags():
     b, c, names = out
     assert len(b) == 2
     assert set(names.values()) == {"人", "未戴安全帽"}
-    assert set(int(x) for x in c) == {0, 1}
+    assert {int(x) for x in c} == {0, 1}
     np.testing.assert_allclose(b[0], b[1])
 
 
@@ -97,7 +97,7 @@ def test_resolve_label_paths_txt_wins(tmp_path: Path):
 
 
 def test_resolve_label_paths_json_when_no_txt(tmp_path: Path):
-    """ktw-anno JSON is used when it is the only label file."""
+    """Ktw-anno JSON is used when it is the only label file."""
     img = tmp_path / "images" / "a.jpg"
     img.parent.mkdir()
     img.touch()
@@ -193,7 +193,7 @@ def test_multimodal_ktw_unknown_text_appended(tmp_path: Path):
 
 
 def test_check_det_dataset_names_optional_for_ktw(tmp_path: Path):
-    """ktw-anno YAML may omit names/nc; a placeholder is filled and flagged for later inference."""
+    """Ktw-anno YAML may omit names/nc; a placeholder is filled and flagged for later inference."""
     images = tmp_path / "images"
     images.mkdir()
     yaml_path = tmp_path / "data.yaml"
@@ -599,6 +599,8 @@ def test_mixed_val_yaml_paths_from_dict_and_file(tmp_path: Path):
     data = {"train": {"yolo_data": ["a.yaml"]}, "val": {"yolo_data": ["lvis.yaml", "test_datasets/data.yaml"]}}
     assert mixed_val_yaml_paths(data) == ["lvis.yaml", "test_datasets/data.yaml"]
     p = tmp_path / "mixed.yaml"
-    p.write_text("train:\n  yolo_data: [a.yaml]\nval:\n  yolo_data:\n    - lvis.yaml\n    - ppe.yaml\n", encoding="utf-8")
+    p.write_text(
+        "train:\n  yolo_data: [a.yaml]\nval:\n  yolo_data:\n    - lvis.yaml\n    - ppe.yaml\n", encoding="utf-8"
+    )
     assert mixed_val_yaml_paths(p) == ["lvis.yaml", "ppe.yaml"]
     assert mixed_val_yaml_paths("test_datasets/data.yaml") == []

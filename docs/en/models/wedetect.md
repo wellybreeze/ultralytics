@@ -95,8 +95,8 @@ First-epoch CUDA OOM on a single GPU halves `batch` (max 3 retries) and rebuilds
 
 Optional mixed-val knobs (dataset YAML or `default.yaml`):
 
-| Key                                    | Default        | Role                                                            |
-| -------------------------------------- | -------------- | --------------------------------------------------------------- |
+| Key                                    | Default        | Role                                                                       |
+| -------------------------------------- | -------------- | -------------------------------------------------------------------------- |
 | `val_fitness_weights`                  | equal share    | Per-set weights (same order as `val.yolo_data`); all epochs unless dynamic |
 | `val_fitness_dynamic`                  | `False`        | If `true`, epoch 2+ reweight from prior mAP50-95 gaps                      |
 | `val_fitness_lvis_target_mult`         | `2.0`          | When a val set is LVIS, its target = `mult ×` mean customer mAP            |
